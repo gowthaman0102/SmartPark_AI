@@ -9,3 +9,5 @@ opencv-python-headless
 plotly
 Pillow
 requests
+folium
+streamlit-folium
