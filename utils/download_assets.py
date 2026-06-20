@@ -4,14 +4,19 @@ import gdown
 
 def download_assets():
 
-    data_dir = Path("data")
-    model_dir = Path("models")
+    base_dir = Path(__file__).resolve().parent.parent
+
+    data_dir = base_dir / "data"
+    model_dir = base_dir / "models"
 
     data_dir.mkdir(exist_ok=True)
     model_dir.mkdir(exist_ok=True)
 
     csv_file = data_dir / "parking_violations.csv"
     model_file = model_dir / "congestion_model.pkl"
+
+    print(f"DATA DIR: {data_dir}")
+    print(f"MODEL DIR: {model_dir}")
 
     if not csv_file.exists():
         print("Downloading parking_violations.csv...")
@@ -30,3 +35,6 @@ def download_assets():
             str(model_file),
             quiet=False
         )
+
+    print("CSV Exists:", csv_file.exists())
+    print("MODEL Exists:", model_file.exists())
