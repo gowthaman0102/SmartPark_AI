@@ -3,7 +3,11 @@ import cv2
 
 print("SMARTPARK YOLO DETECTOR LOADED")
 
-model = YOLO("yolov8x.pt")
+import streamlit as st
+
+@st.cache_resource
+def get_yolo_model():
+    return YOLO("yolov8n.pt")
 
 VEHICLE_CLASSES = [
     "car",
@@ -14,6 +18,8 @@ VEHICLE_CLASSES = [
 
 
 def detect_vehicles(image):
+
+    model = get_yolo_model()
 
     results = model(
         image,
@@ -93,6 +99,8 @@ def detect_vehicles(image):
 
 
 def track_vehicles(image):
+
+    model = get_yolo_model()
 
     results = model.track(
         image,
