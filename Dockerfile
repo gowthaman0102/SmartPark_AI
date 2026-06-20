@@ -1,9 +1,9 @@
-# Use official Python 3.11 slim image (NOT 3.13 – more stable for cv2)
+# Use official Python 3.11 slim image
 FROM python:3.11-slim
 
 # Install system libraries required by opencv-python-headless
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -27,7 +27,7 @@ RUN pip install --upgrade pip && \
 # Copy all project files
 COPY . .
 
-# Expose port (Railway injects $PORT at runtime)
+# Expose port
 EXPOSE 8501
 
 # Run Streamlit
@@ -35,3 +35,4 @@ CMD streamlit run app.py \
     --server.port=${PORT:-8501} \
     --server.address=0.0.0.0 \
     --server.headless=true
+    
