@@ -22,17 +22,6 @@ import streamlit as st
 import plotly.graph_objects as go
 from PIL import Image
 
-from utils.download_assets import download_assets
-from utils.theme import apply_theme
-
-st.set_page_config(
-    page_title="Parking Intelligence",
-    layout="wide"
-)
-
-download_assets()
-apply_theme()
-
 # ─────────────────────────────────────────────────────────────
 # PATH BOOTSTRAP
 # ─────────────────────────────────────────────────────────────
@@ -69,14 +58,12 @@ check_illegal_parking = parking_mod.check_illegal_parking
 st.set_page_config(
     page_title="SmartPark AI – Parking Intelligence",
     page_icon="🚦",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-from utils.theme import apply_theme
-apply_theme()
-
 # ─────────────────────────────────────────────────────────────
-# PAGE-SPECIFIC CSS
+# LIGHT THEME CSS
 # ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -86,8 +73,17 @@ html, body, [class*="css"] {
     font-family: 'Inter', sans-serif;
 }
 
+/* ── Light background ── */
+.stApp {
+    background: #f0f4f8;
+    color: #1e293b;
+}
+
 /* ── Hide default chrome ── */
-#MainMenu, footer, header { visibility: hidden; }
+#MainMenu, footer { visibility: hidden; }
+[data-testid="stSidebar"] {
+    display: block !important;
+}
 .block-container { padding: 1.5rem 2rem; max-width: 1600px; }
 
 /* ── Hero banner ── */
@@ -440,35 +436,17 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
     if use_ocr and _HAS_OCR:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         try:
-            ocr_results = _ocr_reader.readtext(rgb)
-            full_text = " ".join([res[1].lower() for res in ocr_results if res[2] >= 0.15])
-            
-            is_no_parking_context = False
-            if any(kw in full_text for kw in _NO_PARKING_KW):
-                is_no_parking_context = True
-            elif "no" in full_text and ("parking" in full_text or "park" in full_text):
-                is_no_parking_context = True
-
-            for (pts, text, conf) in ocr_results:
-                if conf < 0.15:
+            for (pts, text, conf) in _ocr_reader.readtext(rgb):
+                if conf < 0.30 or not _has_no_parking_text(text):
                     continue
-                t_low = text.lower()
-                is_match = False
-                
-                if any(kw in t_low for kw in _NO_PARKING_KW):
-                    is_match = True
-                elif is_no_parking_context and any(kw in t_low for kw in ["no", "park", "tow", "stop", "prohibit"]):
-                    is_match = True
-                    
-                if is_match:
-                    arr        = np.array(pts, dtype=np.int32)
-                    tx1, ty1   = arr.min(axis=0)
-                    tx2, ty2   = arr.max(axis=0)
-                    pad        = 15
-                    zones.append((
-                        max(0, tx1-pad), max(0, ty1-pad),
-                        min(w, tx2+pad), min(h, ty2+pad)
-                    ))
+                arr        = np.array(pts, dtype=np.int32)
+                tx1, ty1   = arr.min(axis=0)
+                tx2, ty2   = arr.max(axis=0)
+                pad        = 10
+                zones.append((
+                    max(0, tx1-pad), max(0, ty1-pad),
+                    min(w, tx2+pad), min(h, ty2+pad)
+                ))
         except Exception:
             pass
         zones = _merge_zones(zones)
@@ -489,6 +467,43 @@ def _vehicle_near_sign(vx1, vy1, vx2, vy2, sx1, sy1, sx2, sy2, prox: int) -> boo
 def vehicle_near_any_sign(bbox: tuple, sign_zones: list, prox: int = SIGN_PROXIMITY_PX) -> bool:
     vx1, vy1, vx2, vy2 = bbox
     return any(_vehicle_near_sign(vx1, vy1, vx2, vy2, *sz, prox) for sz in sign_zones)
+
+
+def _bbox_iou(a: tuple, b: tuple) -> float:
+    """Compute Intersection-over-Union between two bounding boxes (x1,y1,x2,y2)."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union  = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def deduplicate_vehicles(vehicles: list, iou_threshold: float = 0.45) -> list:
+    """
+    Remove duplicate tracked-vehicle entries caused by YOLO assigning two track IDs
+    to the same physical vehicle.  When two detections overlap by more than
+    iou_threshold, we keep the one with the smaller (earlier) track_id.
+    """
+    if not vehicles:
+        return vehicles
+    # Sort by track_id so we always keep the lower (earlier) ID
+    sorted_vhs = sorted(vehicles, key=lambda v: v["track_id"])
+    kept = []
+    for vh in sorted_vhs:
+        duplicate = False
+        for kv in kept:
+            if _bbox_iou(vh["bbox"], kv["bbox"]) >= iou_threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(vh)
+    return kept
 
 
 # ─────────────────────────────────────────────────────────────
@@ -631,6 +646,19 @@ def process_image(img_bgr: np.ndarray) -> dict:
     annotated  = draw_sign_zones(annotated, sign_zones)
 
     # ── Illegal detection for images: any vehicle bbox near a sign zone ──
+    # First, deduplicate boxes to prevent flagging the same physical vehicle twice
+    # (YOLO can output two overlapping detections for one car).
+    unique_boxes = []
+    for bbox in boxes:
+        duplicate = False
+        for ub in unique_boxes:
+            if _bbox_iou(tuple(bbox), tuple(ub)) >= 0.45:
+                duplicate = True
+                break
+        if not duplicate:
+            unique_boxes.append(bbox)
+    boxes = unique_boxes
+
     violations  = []
     illegal_boxes = set()
     if sign_zones:
@@ -793,6 +821,12 @@ def process_video(video_path: str, progress_bar) -> dict:
             tracked_frame    = frame.copy()
             tracked_vehicles = []
 
+        # ── Deduplicate: remove overlapping detections of the same physical vehicle ──
+        # YOLO sometimes assigns two track IDs to one car; IoU-NMS collapses them
+        # to a single entry (keeping the smaller/earlier track_id) so that one
+        # vehicle can only produce one illegal flag and one bounding box.
+        tracked_vehicles = deduplicate_vehicles(tracked_vehicles, iou_threshold=0.45)
+
         # Update position history
         for vh in tracked_vehicles:
             update_vehicle(vh["track_id"], vh["center"])
@@ -878,12 +912,20 @@ def process_video(video_path: str, progress_bar) -> dict:
     # Even if the time threshold wasn't met (short video / brief appearance),
     # a vehicle visibly next to a NO PARKING sign must be flagged.
     if sign_zones and last_tracked and last_annotated is not None:
+        # Deduplicate the last frame's tracked vehicles too, so the override
+        # cannot introduce a second box for an already-flagged vehicle.
+        last_tracked = deduplicate_vehicles(last_tracked, iou_threshold=0.45)
+
+        # Track which IDs have already been drawn as illegal during the loop
+        already_drawn_illegal = set(illegal_ids)  # snapshot before override
+
         for vh in last_tracked:
             tid  = vh["track_id"]
             bbox = vh["bbox"]
             lbl  = vh["label"]
             if vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX):
                 if tid not in illegal_ids:
+                    # Brand-new violation — add to ids, list, and draw once
                     illegal_ids.add(tid)
                     violations_list.append({
                         "track_id": tid,
@@ -891,8 +933,13 @@ def process_video(video_path: str, progress_bar) -> dict:
                         "duration": 0.0,
                         "bbox"    : bbox,
                     })
-                    # Draw the red illegal box on the final annotated frame
                     last_annotated = draw_illegal(last_annotated, bbox, tid, lbl, 0.0)
+                # If tid was already in illegal_ids AND was NOT drawn during the
+                # final processed frame's loop (edge case: tracking lost then
+                # re-appeared), redraw it exactly once.
+                elif tid not in already_drawn_illegal:
+                    last_annotated = draw_illegal(last_annotated, bbox, tid, lbl, 0.0)
+                # else: already drawn during the loop — do NOT draw again.
 
         # Rebuild final-frame snapshots after the override
         frame_tids             = {vh["track_id"] for vh in last_tracked}
