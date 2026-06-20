@@ -57,7 +57,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    df = pd.read_csv(csv_path)
+    pd.read_csv(csv_path, nrows=50000)
 
     df = df.dropna(
         subset=[
