@@ -1,5 +1,15 @@
 import streamlit as st
-import cv2
+# ── cv2 headless-safe import (fixes libxcb.so.1 error on Railway/Linux) ──
+import os as _os
+_os.environ.setdefault("DISPLAY", "")
+_os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+try:
+    import cv2
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "opencv-python-headless", "--quiet"])
+    import cv2
 import tempfile
 import numpy as np
 import pandas as pd
