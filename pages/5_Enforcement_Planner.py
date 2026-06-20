@@ -2,6 +2,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
+st.set_page_config(
+    page_title="Enforcement Planner",
+    layout="wide"
+)
+
+download_assets()
+apply_theme()
+
 st.title("🚔 AI Enforcement Planner")
 
 junctions = {
