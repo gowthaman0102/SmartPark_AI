@@ -5,7 +5,6 @@ scikit-learn
 joblib
 gdown
 ultralytics
-# IMPORTANT: use HEADLESS build — no X11/libxcb system libs needed on Railway
 opencv-python-headless
 plotly
 Pillow
