@@ -355,12 +355,19 @@ MIN_STATIONARY_FRAMES  = 3      # min processed frames before calling stationary
 # ─────────────────────────────────────────────────────────────
 # OCR / SIGN DETECTION
 # ─────────────────────────────────────────────────────────────
-try:
-    import easyocr
-    _ocr_reader = easyocr.Reader(["en"], verbose=False)
-    _HAS_OCR = True
-except Exception:
-    _HAS_OCR = False
+_HAS_OCR = False
+_ocr_reader = None
+
+def _get_ocr_reader():
+    global _ocr_reader, _HAS_OCR
+    if _ocr_reader is None:
+        try:
+            import easyocr
+            _ocr_reader = easyocr.Reader(["en"], verbose=False)
+            _HAS_OCR = True
+        except Exception:
+            _HAS_OCR = False
+    return _ocr_reader
 
 _NO_PARKING_KW = [
     "no parking", "no parking area", "tow away zone",
