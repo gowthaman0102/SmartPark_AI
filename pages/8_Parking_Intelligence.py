@@ -22,6 +22,17 @@ import streamlit as st
 import plotly.graph_objects as go
 from PIL import Image
 
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
+st.set_page_config(
+    page_title="Parking Intelligence",
+    layout="wide"
+)
+
+download_assets()
+apply_theme()
+
 # ─────────────────────────────────────────────────────────────
 # PATH BOOTSTRAP
 # ─────────────────────────────────────────────────────────────
