@@ -1,16 +1,25 @@
 import streamlit as st
-from utils.download_assets import download_assets
-
-download_assets()
-from utils.theme import apply_theme
 
 st.set_page_config(
     page_title="SmartPark AI",
     page_icon="🚦",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+from utils.download_assets import download_assets
+download_assets()
+
+from utils.theme import apply_theme
 apply_theme()
+st.markdown("""
+<style>
+html, body, .stApp {
+    background: white !important;
+    color: black !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================
 # SIDEBAR BRANDING
