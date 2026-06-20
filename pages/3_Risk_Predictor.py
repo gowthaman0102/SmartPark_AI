@@ -6,7 +6,16 @@ import plotly.express as px
 from datetime import datetime
 from pathlib import Path
 
-st.set_page_config(page_title="AI Risk Predictor", layout="wide")
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
+st.set_page_config(
+    page_title="AI Risk Predictor",
+    layout="wide"
+)
+
+download_assets()
+apply_theme()
 
 st.title("🚨 AI Congestion Risk Predictor")
 
@@ -56,44 +65,31 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+
+    df["junction_name"] = df["junction_name"].fillna("Unknown")
+    df["vehicle_type"] = df["vehicle_type"].fillna("Unknown")
+    df["violation_type"] = df["violation_type"].fillna("Unknown")
+
+    def extract_primary_violation(x):
+        try:
+            v = ast.literal_eval(str(x))
+            if isinstance(v, list):
+                return str(v[0])
+            return str(v)
+        except:
+            return str(x)
+
+    df["primary_violation"] = df["violation_type"].apply(
+        extract_primary_violation
+    )
+
+    return df
 
 
 model, le_junction, le_vehicle, le_violation = load_model()
 
 df = load_data()
-
-
-# ==================================
-# CLEAN DATA
-# ==================================
-
-df["junction_name"] = df["junction_name"].fillna("Unknown")
-df["vehicle_type"] = df["vehicle_type"].fillna("Unknown")
-df["violation_type"] = df["violation_type"].fillna("Unknown")
-
-
-# ==================================
-# VIOLATION PARSER
-# ==================================
-
-def extract_primary_violation(x):
-
-    try:
-        v = ast.literal_eval(str(x))
-
-        if isinstance(v, list):
-            return str(v[0])
-
-        return str(v)
-
-    except:
-        return str(x)
-
-
-df["primary_violation"] = df["violation_type"].apply(
-    extract_primary_violation
-)
 
 
 # ==================================
@@ -187,8 +183,6 @@ with st.form("risk_prediction_form"):
 # ==================================
 # PREDICT
 # ==================================
-
-predict = st.button("Predict Risk")
 
 if predict:
     st.session_state["predict_clicked"] = True
