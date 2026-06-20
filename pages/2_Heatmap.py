@@ -7,15 +7,23 @@ from pathlib import Path
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap
 
-
-# =====================================================
-# PAGE CONFIG
-# =====================================================
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
 
 st.set_page_config(
     page_title="SmartPark AI Heatmap",
     layout="wide"
 )
+
+download_assets()
+apply_theme()
+
+
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+
+
 
 
 st.title("🗺 SmartPark AI Congestion Heatmap")
@@ -49,37 +57,26 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    return pd.read_csv(
-        csv_path
+    df = pd.read_csv(csv_path)
+
+    df = df.dropna(
+        subset=[
+            "latitude",
+            "longitude"
+        ]
     )
 
+    np.random.seed(42)
+    df["parking_pressure"] = np.random.randint(
+        1,
+        100,
+        size=len(df)
+    )
+    df["availability_score"] = 100 - df["parking_pressure"]
+
+    return df
 
 df = load_data()
-
-
-df = df.dropna(
-    subset=[
-        "latitude",
-        "longitude"
-    ]
-)
-
-
-
-# =====================================================
-# PARKING AVAILABILITY FEATURE
-# =====================================================
-
-
-np.random.seed(42)
-
-df["parking_pressure"] = np.random.randint(
-    1,
-    100,
-    size=len(df)
-)
-
-df["availability_score"] = 100 - df["parking_pressure"]
 
 
 
@@ -237,9 +234,9 @@ HeatMap(
     blur=25,
 
     gradient={
-        0.2:"green",
-        0.5:"orange",
-        0.8:"red"
+        0.2:"darkgreen",
+        0.5:"darkorange",
+        0.8:"darkred"
     }
 
 ).add_to(m)
@@ -276,7 +273,6 @@ st.subheader(
 
 
 analysis_df = pd.DataFrame({
-
     "Metric":[
         "Average Parking Pressure",
         "Available Parking Score",
@@ -288,7 +284,6 @@ analysis_df = pd.DataFrame({
         f"{avg_availability}%",
         str(total_locations)
     ]
-
 })
 
 analysis_df["Value"] = analysis_df["Value"].astype(str)
