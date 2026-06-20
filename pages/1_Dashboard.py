@@ -34,7 +34,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    pd.read_csv(csv_path, nrows=50000)
+    df = pd.read_csv(csv_path, nrows=50000)
 
     def extract_primary_violation(x):
         try:
