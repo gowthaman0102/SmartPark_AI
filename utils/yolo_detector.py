@@ -23,8 +23,8 @@ def detect_vehicles(image):
 
     results = model(
         image,
-        imgsz=1280,
-        conf=0.15,
+        imgsz=640,        # reduced from 1280 — uses 4x less memory
+        conf=0.25,        # raised from 0.15 — filters weak detections early
         iou=0.45,
         verbose=False
     )
@@ -40,7 +40,7 @@ def detect_vehicles(image):
         "motorcycle": 0
     }
 
-    detected_boxes = []
+    detected_vehicles = []
 
     for result in results:
 
@@ -55,7 +55,7 @@ def detect_vehicles(image):
 
             confidence = float(box.conf[0])
 
-            if confidence < 0.15:
+            if confidence < 0.25:
                 continue
 
             x1, y1, x2, y2 = (
@@ -68,33 +68,16 @@ def detect_vehicles(image):
             total_count += 1
             counts[label] += 1
 
-            detected_boxes.append(
-                (x1, y1, x2, y2)
-            )
-
-            cv2.rectangle(
-                annotated,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                3
-            )
-
-            cv2.putText(
-                annotated,
-                label,
-                (x1, max(y1 - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2
-            )
+            detected_vehicles.append({
+                "bbox": (x1, y1, x2, y2),
+                "label": label
+            })
 
     return (
         annotated,
         total_count,
         counts,
-        detected_boxes
+        detected_vehicles
     )
 
 
@@ -105,8 +88,8 @@ def track_vehicles(image):
     results = model.track(
         image,
         persist=True,
-        imgsz=1280,
-        conf=0.10,
+        imgsz=640,        # reduced from 1280 — uses 4x less memory
+        conf=0.25,        # raised from 0.10
         iou=0.45,
         verbose=False
     )
@@ -153,24 +136,6 @@ def track_vehicles(image):
                 "bbox": (x1, y1, x2, y2),
                 "center": (center_x, center_y)
             })
-
-            cv2.rectangle(
-                annotated,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                3
-            )
-
-            cv2.putText(
-                annotated,
-                f"{label} #{track_id}",
-                (x1, max(y1 - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 0),
-                2
-            )
 
     return (
         annotated,
