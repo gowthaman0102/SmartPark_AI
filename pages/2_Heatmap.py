@@ -278,27 +278,20 @@ st.subheader(
 analysis_df = pd.DataFrame({
 
     "Metric":[
-
         "Average Parking Pressure",
-
         "Available Parking Score",
-
         "Violation Density"
-
     ],
 
-
     "Value":[
-
         f"{avg_pressure}%",
-
         f"{avg_availability}%",
-
-        total_locations
-
+        str(total_locations)
     ]
 
 })
+
+analysis_df["Value"] = analysis_df["Value"].astype(str)
 
 
 
