@@ -65,7 +65,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    df = pd.read_csv(csv_path)
+    pd.read_csv(csv_path, nrows=50000)
 
     df["junction_name"] = df["junction_name"].fillna("Unknown")
     df["vehicle_type"] = df["vehicle_type"].fillna("Unknown")
