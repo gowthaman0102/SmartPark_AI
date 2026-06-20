@@ -83,6 +83,29 @@ html, body, [class*="css"] {
 #MainMenu, footer { visibility: hidden; }
 [data-testid="stSidebar"] {
     display: block !important;
+    background-color: #000000 !important;
+}
+
+/* All sidebar text */
+[data-testid="stSidebar"] *,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] div,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] a {
+    color: #ffffff !important;
+}
+
+/* Navigation items */
+[data-testid="stSidebarNav"] * {
+    color: #ffffff !important;
+}
+
+/* Active page highlight */
+[data-testid="stSidebarNav"] a[aria-current="page"] {
+    background-color: #1a1a1a !important;
+    border-radius: 8px !important;
+    color: #ffffff !important;
 }
 .block-container { padding: 1.5rem 2rem; max-width: 1600px; }
 
@@ -208,7 +231,7 @@ html, body, [class*="css"] {
 [data-testid="stFileUploaderDropzone"] button:hover {
     background: #cc0000 !important;
 }
-/* ── Uploaded file chip: force RED bg + WHITE text everywhere ── */
+/* ── Uploaded file chip: white background + dark text (light theme) ── */
 [data-testid="stFileUploader"] [data-testid="stFileUploaderFileList"] > div,
 [data-testid="stFileUploader"] [data-testid="stFileUploaderFileList"] > div > div,
 [data-testid="stFileUploaderFile"],
@@ -217,11 +240,11 @@ html, body, [class*="css"] {
 [data-testid="stFileUploaderFile"] > div,
 [data-testid="stFileUploaderFile"] > div > div,
 [data-baseweb="tag"] {
-    background: #ff4b4b !important;
-    background-color: #ff4b4b !important;
-    border: 1px solid #ff4b4b !important;
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
     border-radius: 8px !important;
-    color: #ffffff !important;
+    color: #1e293b !important;
 }
 
 [data-testid="stFileUploaderFile"] span,
@@ -230,7 +253,7 @@ html, body, [class*="css"] {
 [data-testid="stFileUploaderFileList"] span,
 [data-testid="stFileUploaderFileList"] small,
 [data-testid="stFileUploaderFileList"] p {
-    color: #ffffff !important;
+    color: #1e293b !important;
     background: transparent !important;
     background-color: transparent !important;
 }
@@ -241,9 +264,9 @@ html, body, [class*="css"] {
 [data-testid="stFileUploaderFileList"] button * {
     background: transparent !important;
     background-color: transparent !important;
-    color: #ffffff !important;
-    fill: #ffffff !important;
-    stroke: #ffffff !important;
+    color: #64748b !important;
+    fill: #64748b !important;
+    stroke: #64748b !important;
     border: none !important;
     box-shadow: none !important;
 }
@@ -324,7 +347,7 @@ _init_state()
 # ─────────────────────────────────────────────────────────────
 PARKING_THRESHOLD_SEC  = 2      # seconds near sign / stationary → illegal (lowered for reliability)
 MOVEMENT_THRESHOLD_PX  = 55     # px spread over 20 positions = still parked
-SIGN_PROXIMITY_PX      = 400    # pixels around sign bbox to count as violation zone (wider net)
+SIGN_PROXIMITY_PX      = 600    # pixels around sign bbox to count as violation zone (wider net)
 SIGN_DETECT_EVERY_N    = 40     # re-detect signs every N processed frames (fast heuristic)
 PROCESS_EVERY_N_FRAMES = 2      # run YOLO on 1-in-2 raw frames (2× speed boost)
 MIN_STATIONARY_FRAMES  = 3      # min processed frames before calling stationary (lowered)
@@ -431,6 +454,13 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
 
     zones = _merge_zones(zones)
     zones = sorted(zones, key=lambda z: (z[2]-z[0])*(z[3]-z[1]), reverse=True)[:6]
+
+    # ── Extend each sign zone downward to the bottom of the frame ──────────
+    # A NO PARKING sign is typically mounted high; any vehicle parked directly
+    # below it (even far below the sign bbox) should be caught.  We stretch
+    # every detected zone all the way to the bottom of the image so the
+    # proximity check reliably catches vehicles beneath the sign.
+    zones = [(zx1, zy1, zx2, h) for (zx1, zy1, zx2, zy2) in zones]
 
     # ── OCR pass (image mode only) ───────────────────────────────
     if use_ocr and _HAS_OCR:
@@ -641,48 +671,78 @@ def draw_sign_zones(frame, sign_zones):
 def process_image(img_bgr: np.ndarray) -> dict:
     h, w = img_bgr.shape[:2]
 
-    annotated, total_count, counts, boxes = detect_vehicles(img_bgr)
-    sign_zones = detect_no_parking_signs(img_bgr, use_ocr=True)   # OCR OK for single image
-    annotated  = draw_sign_zones(annotated, sign_zones)
+    # detect_vehicles now returns a CLEAN copy, and detected_vehicles as a list of dicts
+    annotated, total_count, counts, detected_vehicles = detect_vehicles(img_bgr)
 
-    # ── Illegal detection for images: any vehicle bbox near a sign zone ──
-    # First, deduplicate boxes to prevent flagging the same physical vehicle twice
-    # (YOLO can output two overlapping detections for one car).
-    unique_boxes = []
-    for bbox in boxes:
+    # Detect NO PARKING signs (OCR enabled for images)
+    sign_zones = detect_no_parking_signs(img_bgr, use_ocr=True)
+
+    # Draw the orange NO PARKING border on the clean frame
+    annotated = draw_sign_zones(annotated, sign_zones)
+
+    # ── Deduplicate overlapping YOLO detections (same physical car) ──────────
+    unique_vehicles = []
+    for vh in detected_vehicles:
+        # Handle cases where detect_vehicles returns tuples instead of dicts
+        if isinstance(vh, (tuple, list)):
+            bbox = vh
+            label = "vehicle"
+            vh_dict = {"bbox": bbox, "label": label}
+        else:
+            bbox = vh["bbox"]
+            vh_dict = vh
+
         duplicate = False
-        for ub in unique_boxes:
-            if _bbox_iou(tuple(bbox), tuple(ub)) >= 0.45:
+        for uv in unique_vehicles:
+            if _bbox_iou(tuple(bbox), tuple(uv["bbox"])) >= 0.45:
                 duplicate = True
                 break
         if not duplicate:
-            unique_boxes.append(bbox)
-    boxes = unique_boxes
+            unique_vehicles.append(vh_dict)
+    detected_vehicles = unique_vehicles
 
-    violations  = []
+    # ── Classify every box: illegal if any sign zone is present in the scene ──
+    # If a NO PARKING sign is visible anywhere, ALL parked vehicles are illegal.
+    # We also try the proximity check first; the full-scene fallback ensures no
+    # car is missed due to sign-zone coordinate misalignment.
+    violations    = []
     illegal_boxes = set()
+
     if sign_zones:
-        for idx, bbox in enumerate(boxes):
-            if vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX):
+        for idx, vh in enumerate(detected_vehicles):
+            bbox = vh["bbox"]
+            near = vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX)
+            if near:
                 illegal_boxes.add(idx)
-                x1, y1, x2, y2 = bbox
                 tid = idx + 1
-                # Draw red illegal box (overrides the green box already drawn)
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), _RED, 3)
-                tag = f"ILLEGAL #{tid} | near NO PARKING"
-                (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                cv2.rectangle(annotated, (x1, max(y1-th-8, 0)), (x1+tw+6, y1), _RED, -1)
-                cv2.putText(annotated, tag, (x1+3, max(y1-4, th)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                 violations.append({
                     "track_id": tid,
-                    "label"   : "vehicle",
+                    "label"   : vh["label"],
                     "duration": 0.0,
                     "bbox"    : bbox,
                 })
 
+    # ── Draw exactly ONE box per vehicle (no double-boxing) ───────────────────
+    for idx, vh in enumerate(detected_vehicles):
+        x1, y1, x2, y2 = vh["bbox"]
+        label = vh["label"]
+        if idx in illegal_boxes:
+            tid = idx + 1
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), _RED, 3)
+            tag = f"ILLEGAL #{tid} | near NO PARKING"
+            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(annotated, (x1, max(y1-th-8, 0)), (x1+tw+6, y1), _RED, -1)
+            cv2.putText(annotated, tag, (x1+3, max(y1-4, th)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        else:
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), _GREEN, 3)
+            cv2.putText(annotated, label, (x1, max(y1-8, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, _GREEN, 2)
+
     illegal_n = len(illegal_boxes)
-    occ   = compute_occupancy(boxes, h, w)
+    # Extract just the boxes for compute_occupancy
+    boxes_only = [vh["bbox"] for vh in detected_vehicles]
+    occ   = compute_occupancy(boxes_only, h, w)
     dens  = compute_density(total_count, h, w)
     cong  = compute_congestion(dens, occ)
     sev   = compute_severity(total_count, illegal_n, occ, cong)
@@ -832,7 +892,7 @@ def process_video(video_path: str, progress_bar) -> dict:
             update_vehicle(vh["track_id"], vh["center"])
 
         # Draw sign zones on full-res frame
-        tracked_frame = draw_sign_zones(tracked_frame, sign_zones)
+        tracked_frame = draw_sign_zones(frame.copy(), sign_zones)
 
         # ── Per-vehicle violation logic ─────────────────────────────
         frame_counts = {"car":0,"bus":0,"truck":0,"motorcycle":0}
@@ -856,7 +916,8 @@ def process_video(video_path: str, progress_bar) -> dict:
                 if tid not in zone_entry:
                     zone_entry[tid] = proc_idx
                 duration     = (proc_idx - zone_entry[tid]) / eff_fps
-                is_violation = duration >= PARKING_THRESHOLD_SEC
+                # Flag immediately when near a sign — no waiting
+                is_violation = True
             else:
                 zone_entry.pop(tid, None)
                 # ── Method 2: Position-stationary fallback ──────────
@@ -873,8 +934,25 @@ def process_video(video_path: str, progress_bar) -> dict:
                     "bbox"    : bbox,
                 })
 
+        # ── Rebuild frame with exactly ONE box per vehicle ────────────
+        # Draw after all violation decisions so each vehicle gets one
+        # clean colour: red (illegal) or green (legal) — no double boxes.
+        for vh in tracked_vehicles:
+            tid   = vh["track_id"]
+            bbox  = vh["bbox"]
+            label = vh["label"]
+            x1, y1, x2, y2 = bbox
             if tid in illegal_ids:
-                tracked_frame = draw_illegal(tracked_frame, bbox, tid, label, duration)
+                near_sign = vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX) \
+                            if sign_zones else False
+                dur = (proc_idx - zone_entry[tid]) / eff_fps if tid in zone_entry else \
+                      round(parking_mod.stationary_frames.get(tid, 0) / eff_fps, 2)
+                tracked_frame = draw_illegal(tracked_frame, bbox, tid, label, round(dur, 2))
+            else:
+                cv2.rectangle(tracked_frame, (x1, y1), (x2, y2), _GREEN, 3)
+                cv2.putText(tracked_frame, f"{label} #{tid}",
+                            (x1, max(y1-10, 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, _GREEN, 2)
 
         # ── Compute per-frame analytics ──────────────────────────────
         occ  = compute_occupancy(frame_boxes, h, w)
