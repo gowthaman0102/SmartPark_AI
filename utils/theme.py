@@ -105,6 +105,15 @@ def apply_theme():
         /* ═══════════════════════════════════════════
            MAIN AREA — Solid Darker Colors (Not Faded)
         ═══════════════════════════════════════════ */
+        /* Main page background */
+.main .block-container {
+    background-color: #ffffff !important;
+}
+
+/* All normal text */
+p, span, div, label {
+    color: #0d1b2a;
+}
 
         /* Success boxes → Solid Dark Green */
         [data-testid="stNotification"][kind="success"],
@@ -193,15 +202,17 @@ def apply_theme():
             font-weight: 700 !important;
         }
 
-        /* Prevent dimming/blinking on rerun */
-        div[data-testid="stAppViewBlockContainer"],
-        div[data-testid="stAppViewContainer"],
-        div.stMainBlockContainer,
-        .stApp {
-            opacity: 1 !important;
-            filter: none !important;
-            transition: none !important;
-        }
+        /* Force main content area to light theme */
+.stApp,
+div[data-testid="stAppViewContainer"],
+div[data-testid="stAppViewBlockContainer"],
+section.main {
+    background-color: #ffffff !important;
+    color: #0d1b2a !important;
+    opacity: 1 !important;
+    filter: none !important;
+    transition: none !important;
+}
         
         /* Hide the "Running..." overlay in the top right */
         div[data-testid="stStatusWidget"] {
