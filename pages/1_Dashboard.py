@@ -16,9 +16,7 @@ st.set_page_config(
 download_assets()
 from pathlib import Path
 
-st.write("Current Directory:", Path.cwd())
-st.write("CSV Exists:", Path("data/parking_violations.csv").exists())
-st.write("Model Exists:", Path("models/congestion_model.pkl").exists())
+
 apply_theme()
 
 # =====================================
