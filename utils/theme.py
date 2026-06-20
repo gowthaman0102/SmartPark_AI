@@ -91,6 +91,46 @@ def apply_theme():
             color: #ffffff !important;
             border: 1px solid #555555 !important;
         }
+        /* ====================================
+   MAIN PAGE SELECTBOX (LIGHT THEME)
+==================================== */
+
+/* Closed selectbox */
+.stSelectbox > div > div {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    border: 1px solid #cccccc !important;
+}
+
+/* Dropdown popup container */
+div[data-baseweb="select"] > div {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+}
+
+/* Dropdown list */
+div[role="listbox"] {
+    background-color: #ffffff !important;
+    border: 1px solid #cccccc !important;
+}
+
+/* Dropdown options */
+div[role="option"] {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+}
+
+/* Hover option */
+div[role="option"]:hover {
+    background-color: #e8f0fe !important;
+    color: #000000 !important;
+}
+
+/* Selected option */
+div[aria-selected="true"] {
+    background-color: #dbeafe !important;
+    color: #000000 !important;
+}
 
         /* Sidebar success / info / warning / error notification text */
         section[data-testid="stSidebar"] [data-testid="stNotification"] p {
@@ -108,6 +148,13 @@ def apply_theme():
         /* Main page background */
 .main .block-container {
     background-color: #ffffff !important;
+}
+/* Input widgets */
+input,
+textarea,
+select {
+    background-color: #ffffff !important;
+    color: #000000 !important;
 }
 
 /* All normal text */
