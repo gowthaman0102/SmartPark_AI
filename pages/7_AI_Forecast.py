@@ -3,10 +3,16 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
 st.set_page_config(
     page_title="AI Forecast",
     layout="wide"
 )
+
+download_assets()
+apply_theme()
 
 st.title("🔮 AI Congestion Forecast")
 
@@ -14,15 +20,16 @@ st.title("🔮 AI Congestion Forecast")
 # LOAD DATA
 # =====================================
 
-csv_path = (
-    Path(__file__).parent.parent
-    / "data"
-    / "parking_violations.csv"
-)
+@st.cache_data
+def load_data():
+    csv_path = (
+        Path(__file__).parent.parent
+        / "data"
+        / "parking_violations.csv"
+    )
+    return pd.read_csv(csv_path)
 
-df = pd.read_csv(
-    csv_path
-)
+df = load_data()
 
 # Clean Junctions
 df["junction_name"] = (
