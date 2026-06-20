@@ -2,10 +2,16 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
 st.set_page_config(
     page_title="AI Command Center",
     layout="wide"
 )
+
+download_assets()
+apply_theme()
 
 st.title("🚨 SmartPark AI Command Center")
 
@@ -26,30 +32,24 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    return pd.read_csv(
-        csv_path
+    df = pd.read_csv(csv_path)
+
+    df["junction_name"] = (
+        df["junction_name"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
 
+    df = df[df["junction_name"] != ""]
+    df = df[df["junction_name"].str.upper() != "NO JUNCTION"]
+    df = df[df["junction_name"].str.upper() != "UNKNOWN"]
+    df = df[df["junction_name"].str.upper() != "NULL"]
+    df = df[df["junction_name"].str.upper() != "NAN"]
+
+    return df
+
 df = load_data()
-
-# =====================================================
-# CLEAN JUNCTION DATA
-# =====================================================
-
-df["junction_name"] = (
-    df["junction_name"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-)
-
-# Remove fake / placeholder junctions
-
-df = df[df["junction_name"] != ""]
-df = df[df["junction_name"].str.upper() != "NO JUNCTION"]
-df = df[df["junction_name"].str.upper() != "UNKNOWN"]
-df = df[df["junction_name"].str.upper() != "NULL"]
-df = df[df["junction_name"].str.upper() != "NAN"]
 
 # =====================================================
 # HOTSPOT ANALYSIS
