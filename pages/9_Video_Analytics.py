@@ -6,25 +6,23 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from utils.yolo_detector import (
-    detect_vehicles,
-    track_vehicles
-)
-
-from utils.parking_detector import (
-    update_vehicle,
-    check_illegal_parking
-)
-from utils.congestion_engine import calculate_congestion
-
-# =====================================================
-# PAGE CONFIG
-# =====================================================
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
 
 st.set_page_config(
     page_title="Traffic Vision AI",
     layout="wide"
 )
+
+download_assets()
+apply_theme()
+
+
+# =====================================================
+# PAGE CONFIG
+# =====================================================
+
+
 
 # =====================================================
 # HEADER
