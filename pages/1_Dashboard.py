@@ -4,11 +4,17 @@ import plotly.express as px
 import ast
 from pathlib import Path
 
+from utils.download_assets import download_assets
+from utils.theme import apply_theme
+
 st.set_page_config(
     page_title="SmartPark Dashboard",
     page_icon="📊",
     layout="wide"
 )
+
+download_assets()
+apply_theme()
 
 # =====================================
 # LOAD DATA
@@ -23,31 +29,26 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path)
+
+    def extract_primary_violation(x):
+        try:
+            parsed = ast.literal_eval(str(x))
+            if isinstance(parsed, list):
+                return str(parsed[0])
+            return str(parsed)
+        except:
+            return str(x)
+
+    df["primary_violation"] = (
+        df["violation_type"]
+        .fillna("Unknown")
+        .apply(extract_primary_violation)
+    )
+
+    return df
 
 df = load_data()
-
-# =====================================
-# CLEAN VIOLATIONS
-# =====================================
-
-def extract_primary_violation(x):
-    try:
-        parsed = ast.literal_eval(str(x))
-
-        if isinstance(parsed, list):
-            return str(parsed[0])
-
-        return str(parsed)
-
-    except:
-        return str(x)
-
-df["primary_violation"] = (
-    df["violation_type"]
-    .fillna("Unknown")
-    .apply(extract_primary_violation)
-)
 
 # =====================================
 # TITLE
