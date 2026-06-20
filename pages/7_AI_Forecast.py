@@ -27,7 +27,7 @@ def load_data():
         / "data"
         / "parking_violations.csv"
     )
-    return pd.read_csv(csv_path)
+    return pd.read_csv(csv_path, nrows=50000)
 
 df = load_data()
 
