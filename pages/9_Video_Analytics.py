@@ -8,6 +8,17 @@ import plotly.graph_objects as go
 
 from utils.download_assets import download_assets
 from utils.theme import apply_theme
+from utils.yolo_detector import (
+    detect_vehicles,
+    track_vehicles
+)
+
+from utils.parking_detector import (
+    update_vehicle,
+    check_illegal_parking
+)
+
+from utils.congestion_engine import calculate_congestion
 
 st.set_page_config(
     page_title="Traffic Vision AI",
@@ -112,6 +123,29 @@ if uploaded_file is not None:
             counts,
             detected_boxes
         ) = detect_vehicles(image)
+        for vehicle in detected_boxes:
+
+            x1, y1, x2, y2 = vehicle["bbox"]
+
+            label = vehicle["label"]
+
+            cv2.rectangle(
+                annotated,
+                (x1, y1),
+                (x2, y2),
+                (0, 255, 0),
+                3
+            )
+
+            cv2.putText(
+                annotated,
+                label.upper(),
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2
+            )
 
         (
             density_score,
@@ -227,6 +261,27 @@ if uploaded_file is not None:
                 frame_boxes.append(
                     vehicle["bbox"]
                 )
+                x1, y1, x2, y2 = vehicle["bbox"]
+
+                # Draw GREEN box for every detected vehicle
+                cv2.rectangle(
+                    annotated,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 255, 0),
+                    2
+                )
+
+                cv2.putText(
+                annotated,
+                f"{label} #{track_id}",
+                (x1, max(y1 - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2
+            )
+                
 
                 if violation:
 
