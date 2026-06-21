@@ -11,6 +11,3 @@ Pillow
 requests
 folium
 streamlit-folium
-easyocr
-torch
-torchvision
