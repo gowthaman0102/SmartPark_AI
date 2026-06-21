@@ -108,7 +108,7 @@ else:
 st.divider()
 
 st.subheader(
-    "🏆 Top 10 Hotspots Ranking"
+    "🏆 Top 5 Hotspots Ranking"
 )
 
 ranking_df = df.sort_values(
