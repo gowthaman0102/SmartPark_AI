@@ -141,3 +141,4 @@ def track_vehicles(image):
         annotated,
         tracked_vehicles
     )
+    
