@@ -354,20 +354,15 @@ MIN_STATIONARY_FRAMES  = 3      # min processed frames before calling stationary
 
 # ─────────────────────────────────────────────────────────────
 # OCR / SIGN DETECTION
+# easyocr disabled on Railway (too heavy for cloud deployment)
+# Sign detection uses fast color+shape heuristic only
 # ─────────────────────────────────────────────────────────────
 _HAS_OCR = False
 _ocr_reader = None
 
 def _get_ocr_reader():
-    global _ocr_reader, _HAS_OCR
-    if _ocr_reader is None:
-        try:
-            import easyocr
-            _ocr_reader = easyocr.Reader(["en"], verbose=False)
-            _HAS_OCR = True
-        except Exception:
-            _HAS_OCR = False
-    return _ocr_reader
+    # OCR disabled - returns None, color heuristic handles sign detection
+    return None
 
 _NO_PARKING_KW = [
     "no parking", "no parking area", "tow away zone",
@@ -405,88 +400,104 @@ def _merge_zones(zones: list) -> list:
 
 def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> list:
     """
-    Fast NO PARKING zone detector.
-    Primary  : red/blue/yellow color+shape heuristic (no OCR – very fast).
-    Optional : OCR via easyocr when use_ocr=True (slow, for image mode only).
-    Returns list of (x1,y1,x2,y2) zone boxes.
+    Strict NO PARKING sign detector.
+    Only detects actual signboards — NOT road barriers, car colors, or buildings.
+
+    Rules for a valid sign candidate:
+    1. Must be a small, compact region (0.05% – 3% of frame area)
+    2. Must have a near-square or moderate aspect ratio (signs are compact)
+    3. Must NOT be extremely wide (barriers are wide, signs are not)
+    4. Must be in upper 75% of frame (signs are mounted high, not on ground)
+    5. Must have high color saturation (real signs are vivid, not washed out)
+    6. Circularity OR compactness must indicate a sign shape
+    Returns list of (x1,y1,x2,y2) zone boxes, or [] if no real sign found.
     """
     zones = []
     h, w  = frame_bgr.shape[:2]
     frame_area = h * w
 
     # Work on a half-size copy for speed
-    small   = cv2.resize(frame_bgr, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
-    sh, sw  = small.shape[:2]
-    hsv     = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    kern3   = np.ones((3, 3), np.uint8)
-    kern5   = np.ones((5, 5), np.uint8)
+    small  = cv2.resize(frame_bgr, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
+    sh, sw = small.shape[:2]
+    small_area = sh * sw
+    hsv    = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    kern3  = np.ones((3, 3), np.uint8)
+    kern5  = np.ones((5, 5), np.uint8)
 
-    # ── Red mask (classic No Parking circle sign) ────────────────────
-    m_r1 = cv2.inRange(hsv, (0,   100, 80), (12,  255, 255))
-    m_r2 = cv2.inRange(hsv, (160, 100, 80), (180, 255, 255))
+    # ── Strict Red mask — high saturation only (avoids orange barriers/cars) ──
+    m_r1 = cv2.inRange(hsv, (0,   150, 100), (10,  255, 255))
+    m_r2 = cv2.inRange(hsv, (165, 150, 100), (180, 255, 255))
     red  = cv2.morphologyEx(cv2.bitwise_or(m_r1, m_r2), cv2.MORPH_CLOSE, kern5)
 
-    # ── Yellow / amber mask (Indian advisory boards) ──────────────
-    yellow = cv2.morphologyEx(
-        cv2.inRange(hsv, (15, 80, 120), (38, 255, 255)), cv2.MORPH_CLOSE, kern5)
-
-    # ── Blue mask (blue prohibition signs) ────────────────────
+    # ── Strict Blue mask — vivid blue only (avoids shadows/sky) ──
     blue = cv2.morphologyEx(
-        cv2.inRange(hsv, (100, 80, 60), (140, 255, 255)), cv2.MORPH_CLOSE, kern5)
+        cv2.inRange(hsv, (105, 150, 80), (130, 255, 255)), cv2.MORPH_CLOSE, kern5)
 
-    for mask in (red, yellow, blue):
+    # NOTE: Yellow/amber removed entirely — causes too many false positives
+    # (road barriers, auto-rickshaws, taxi cabs, construction equipment are all yellow)
+
+    for mask in (red, blue):
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern3)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        small_area = sh * sw
+
         for cnt in cnts:
             area = cv2.contourArea(cnt)
-            if not (small_area * 0.0004 < area < small_area * 0.20):
+
+            # Rule 1: Size — must be small compact region, not a large surface
+            # Min: 0.05% of frame (tiny sign), Max: 3% of frame (large sign board)
+            # Old code allowed up to 20% — that catches entire car bodies and barriers
+            if not (small_area * 0.0005 < area < small_area * 0.03):
                 continue
+
             bx, by, bw, bh = cv2.boundingRect(cnt)
+
+            # Rule 2: Must be in upper 75% of frame — signs are mounted, not on ground
+            if by > sh * 0.75:
+                continue
+
+            # Rule 3: Aspect ratio — signs are compact, not elongated like barriers
+            # Barriers are very wide (aspect >> 4), signs are roughly square to 3:1
             aspect = bw / (bh + 1e-6)
-            # Check circularity for round signs
+            if aspect > 3.5 or aspect < 0.3:
+                continue
+
+            # Rule 4: Minimum pixel size — ignore tiny noise blobs
+            if bw < 15 or bh < 15:
+                continue
+
+            # Rule 5: Circularity check — round signs (NO PARKING circle) score high
             perim = cv2.arcLength(cnt, True)
             circ  = (4 * math.pi * area / (perim * perim)) if perim > 0 else 0
-            if circ < 0.25 and not (0.35 < aspect < 4.0):
+
+            # Rule 6: Compactness — filled ratio (area vs bounding box)
+            fill  = area / (bw * bh + 1e-6)
+
+            # Must pass EITHER circularity (round sign) OR good fill (rectangular sign)
+            if circ < 0.35 and fill < 0.45:
                 continue
-            if bw < 12 or bh < 10:
-                continue
-            # Scale coords back to full resolution with a small padding
-            pad  = 5
-            rx1  = max(0, (bx - pad) * 2)
-            ry1  = max(0, (by - pad) * 2)
-            rx2  = min(w, (bx + bw + pad) * 2)
-            ry2  = min(h, (by + bh + pad) * 2)
+
+            # Passed all checks — this looks like an actual sign
+            pad = 4
+            rx1 = max(0, (bx - pad) * 2)
+            ry1 = max(0, (by - pad) * 2)
+            rx2 = min(w, (bx + bw + pad) * 2)
+            ry2 = min(h, (by + bh + pad) * 2)
             zones.append((rx1, ry1, rx2, ry2))
 
     zones = _merge_zones(zones)
-    zones = sorted(zones, key=lambda z: (z[2]-z[0])*(z[3]-z[1]), reverse=True)[:6]
+    # Keep at most 4 sign candidates
+    zones = sorted(zones, key=lambda z: (z[2]-z[0])*(z[3]-z[1]), reverse=True)[:4]
 
-    # ── Extend each sign zone downward to the bottom of the frame ──────────
-    # A NO PARKING sign is typically mounted high; any vehicle parked directly
-    # below it (even far below the sign bbox) should be caught.  We stretch
-    # every detected zone all the way to the bottom of the image so the
-    # proximity check reliably catches vehicles beneath the sign.
-    zones = [(zx1, zy1, zx2, h) for (zx1, zy1, zx2, zy2) in zones]
-
-    # ── OCR pass (image mode only) ───────────────────────────────
-    if use_ocr and _HAS_OCR:
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        try:
-            for (pts, text, conf) in _ocr_reader.readtext(rgb):
-                if conf < 0.30 or not _has_no_parking_text(text):
-                    continue
-                arr        = np.array(pts, dtype=np.int32)
-                tx1, ty1   = arr.min(axis=0)
-                tx2, ty2   = arr.max(axis=0)
-                pad        = 10
-                zones.append((
-                    max(0, tx1-pad), max(0, ty1-pad),
-                    min(w, tx2+pad), min(h, ty2+pad)
-                ))
-        except Exception:
-            pass
-        zones = _merge_zones(zones)
+    # Extend sign zones downward — vehicles below a sign are in violation zone
+    # BUT only extend by 2x the sign height, not the entire frame
+    # (extending to full frame bottom caused ALL vehicles to be flagged)
+    extended = []
+    for (zx1, zy1, zx2, zy2) in zones:
+        sign_h = zy2 - zy1
+        # Extend down by 3x sign height max, capped at frame bottom
+        new_zy2 = min(h, zy2 + sign_h * 3)
+        extended.append((zx1, zy1, zx2, new_zy2))
+    zones = extended
 
     return zones
 
@@ -682,7 +693,7 @@ def process_image(img_bgr: np.ndarray) -> dict:
     annotated, total_count, counts, detected_vehicles = detect_vehicles(img_bgr)
 
     # Detect NO PARKING signs (OCR enabled for images)
-    sign_zones = detect_no_parking_signs(img_bgr, use_ocr=True)
+    sign_zones = detect_no_parking_signs(img_bgr, use_ocr=False)
 
     # Draw the orange NO PARKING border on the clean frame
     annotated = draw_sign_zones(annotated, sign_zones)
