@@ -4,6 +4,18 @@ parking_intelligence.py
 =======================
 SmartPark AI – Production-Ready Parking Intelligence Dashboard
 Integrates: yolo_detector.py · parking_detector.py · yolov8x.pt
+
+FIX LOG (bounding-box overhaul):
+  • detect_vehicles / track_vehicles return pre-annotated frames – we now
+    discard those frames and always draw on a CLEAN copy of the original.
+  • Single drawing pass per frame: every vehicle gets exactly ONE box
+    (red = illegal, green = legal). No double-boxing possible.
+  • process_image  – clean frame path added; manual draw loop is the sole
+    renderer.
+  • process_video  – tracked_frame is always rebuilt from frame.copy();
+    the YOLO-annotated return value is discarded.
+  • Final-frame override redraws only vehicles that were NOT already drawn
+    in the last loop pass (guarded by already_drawn_illegal set).
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -231,7 +243,6 @@ html, body, [class*="css"] {
 [data-testid="stFileUploaderDropzone"] button:hover {
     background: #cc0000 !important;
 }
-/* ── Uploaded file chip: white background + dark text (light theme) ── */
 [data-testid="stFileUploader"] [data-testid="stFileUploaderFileList"] > div,
 [data-testid="stFileUploader"] [data-testid="stFileUploaderFileList"] > div > div,
 [data-testid="stFileUploaderFile"],
@@ -270,7 +281,6 @@ html, body, [class*="css"] {
     border: none !important;
     box-shadow: none !important;
 }
-
 
 /* ── Divider ── */
 .sp-divider {
@@ -345,23 +355,20 @@ _init_state()
 # ─────────────────────────────────────────────────────────────
 # DETECTION SETTINGS
 # ─────────────────────────────────────────────────────────────
-PARKING_THRESHOLD_SEC  = 2      # seconds near sign / stationary → illegal (lowered for reliability)
-MOVEMENT_THRESHOLD_PX  = 55     # px spread over 20 positions = still parked
-SIGN_PROXIMITY_PX      = 600    # pixels around sign bbox to count as violation zone (wider net)
-SIGN_DETECT_EVERY_N    = 40     # re-detect signs every N processed frames (fast heuristic)
-PROCESS_EVERY_N_FRAMES = 2      # run YOLO on 1-in-2 raw frames (2× speed boost)
-MIN_STATIONARY_FRAMES  = 3      # min processed frames before calling stationary (lowered)
+PARKING_THRESHOLD_SEC  = 2
+MOVEMENT_THRESHOLD_PX  = 55
+SIGN_PROXIMITY_PX      = 600
+SIGN_DETECT_EVERY_N    = 40
+PROCESS_EVERY_N_FRAMES = 2
+MIN_STATIONARY_FRAMES  = 3
 
 # ─────────────────────────────────────────────────────────────
 # OCR / SIGN DETECTION
-# easyocr disabled on Railway (too heavy for cloud deployment)
-# Sign detection uses fast color+shape heuristic only
 # ─────────────────────────────────────────────────────────────
-_HAS_OCR = False
+_HAS_OCR    = False
 _ocr_reader = None
 
 def _get_ocr_reader():
-    # OCR disabled - returns None, color heuristic handles sign detection
     return None
 
 _NO_PARKING_KW = [
@@ -374,7 +381,6 @@ def _has_no_parking_text(text: str) -> bool:
 
 
 def _merge_zones(zones: list) -> list:
-    """Merge overlapping bounding boxes into a single zone."""
     if not zones:
         return []
     changed = True
@@ -399,24 +405,10 @@ def _merge_zones(zones: list) -> list:
 
 
 def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> list:
-    """
-    Strict NO PARKING sign detector.
-    Only detects actual signboards — NOT road barriers, car colors, or buildings.
-
-    Rules for a valid sign candidate:
-    1. Must be a small, compact region (0.05% – 3% of frame area)
-    2. Must have a near-square or moderate aspect ratio (signs are compact)
-    3. Must NOT be extremely wide (barriers are wide, signs are not)
-    4. Must be in upper 75% of frame (signs are mounted high, not on ground)
-    5. Must have high color saturation (real signs are vivid, not washed out)
-    6. Circularity OR compactness must indicate a sign shape
-    Returns list of (x1,y1,x2,y2) zone boxes, or [] if no real sign found.
-    """
     zones = []
     h, w  = frame_bgr.shape[:2]
     frame_area = h * w
 
-    # Work on a half-size copy for speed
     small  = cv2.resize(frame_bgr, (w // 2, h // 2), interpolation=cv2.INTER_LINEAR)
     sh, sw = small.shape[:2]
     small_area = sh * sw
@@ -424,17 +416,12 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
     kern3  = np.ones((3, 3), np.uint8)
     kern5  = np.ones((5, 5), np.uint8)
 
-    # ── Strict Red mask — high saturation only (avoids orange barriers/cars) ──
     m_r1 = cv2.inRange(hsv, (0,   150, 100), (10,  255, 255))
     m_r2 = cv2.inRange(hsv, (165, 150, 100), (180, 255, 255))
     red  = cv2.morphologyEx(cv2.bitwise_or(m_r1, m_r2), cv2.MORPH_CLOSE, kern5)
 
-    # ── Strict Blue mask — vivid blue only (avoids shadows/sky) ──
     blue = cv2.morphologyEx(
         cv2.inRange(hsv, (105, 150, 80), (130, 255, 255)), cv2.MORPH_CLOSE, kern5)
-
-    # NOTE: Yellow/amber removed entirely — causes too many false positives
-    # (road barriers, auto-rickshaws, taxi cabs, construction equipment are all yellow)
 
     for mask in (red, blue):
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kern3)
@@ -442,41 +429,28 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
 
         for cnt in cnts:
             area = cv2.contourArea(cnt)
-
-            # Rule 1: Size — must be small compact region, not a large surface
-            # Min: 0.05% of frame (tiny sign), Max: 3% of frame (large sign board)
-            # Old code allowed up to 20% — that catches entire car bodies and barriers
             if not (small_area * 0.0005 < area < small_area * 0.03):
                 continue
 
             bx, by, bw, bh = cv2.boundingRect(cnt)
 
-            # Rule 2: Must be in upper 75% of frame — signs are mounted, not on ground
             if by > sh * 0.75:
                 continue
 
-            # Rule 3: Aspect ratio — signs are compact, not elongated like barriers
-            # Barriers are very wide (aspect >> 4), signs are roughly square to 3:1
             aspect = bw / (bh + 1e-6)
             if aspect > 3.5 or aspect < 0.3:
                 continue
 
-            # Rule 4: Minimum pixel size — ignore tiny noise blobs
             if bw < 15 or bh < 15:
                 continue
 
-            # Rule 5: Circularity check — round signs (NO PARKING circle) score high
             perim = cv2.arcLength(cnt, True)
             circ  = (4 * math.pi * area / (perim * perim)) if perim > 0 else 0
-
-            # Rule 6: Compactness — filled ratio (area vs bounding box)
             fill  = area / (bw * bh + 1e-6)
 
-            # Must pass EITHER circularity (round sign) OR good fill (rectangular sign)
             if circ < 0.35 and fill < 0.45:
                 continue
 
-            # Passed all checks — this looks like an actual sign
             pad = 4
             rx1 = max(0, (bx - pad) * 2)
             ry1 = max(0, (by - pad) * 2)
@@ -485,16 +459,11 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
             zones.append((rx1, ry1, rx2, ry2))
 
     zones = _merge_zones(zones)
-    # Keep at most 4 sign candidates
     zones = sorted(zones, key=lambda z: (z[2]-z[0])*(z[3]-z[1]), reverse=True)[:4]
 
-    # Extend sign zones downward — vehicles below a sign are in violation zone
-    # BUT only extend by 2x the sign height, not the entire frame
-    # (extending to full frame bottom caused ALL vehicles to be flagged)
     extended = []
     for (zx1, zy1, zx2, zy2) in zones:
         sign_h = zy2 - zy1
-        # Extend down by 3x sign height max, capped at frame bottom
         new_zy2 = min(h, zy2 + sign_h * 3)
         extended.append((zx1, zy1, zx2, new_zy2))
     zones = extended
@@ -506,7 +475,6 @@ def detect_no_parking_signs(frame_bgr: np.ndarray, use_ocr: bool = False) -> lis
 # GEOMETRY HELPERS
 # ─────────────────────────────────────────────────────────────
 def _vehicle_near_sign(vx1, vy1, vx2, vy2, sx1, sy1, sx2, sy2, prox: int) -> bool:
-    """True if vehicle bbox overlaps or is within prox pixels of sign zone."""
     ex1, ey1 = sx1 - prox, sy1 - prox
     ex2, ey2 = sx2 + prox, sy2 + prox
     return not (vx2 < ex1 or vx1 > ex2 or vy2 < ey1 or vy1 > ey2)
@@ -518,7 +486,6 @@ def vehicle_near_any_sign(bbox: tuple, sign_zones: list, prox: int = SIGN_PROXIM
 
 
 def _bbox_iou(a: tuple, b: tuple) -> float:
-    """Compute Intersection-over-Union between two bounding boxes (x1,y1,x2,y2)."""
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
     ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
@@ -533,14 +500,8 @@ def _bbox_iou(a: tuple, b: tuple) -> float:
 
 
 def deduplicate_vehicles(vehicles: list, iou_threshold: float = 0.45) -> list:
-    """
-    Remove duplicate tracked-vehicle entries caused by YOLO assigning two track IDs
-    to the same physical vehicle.  When two detections overlap by more than
-    iou_threshold, we keep the one with the smaller (earlier) track_id.
-    """
     if not vehicles:
         return vehicles
-    # Sort by track_id so we always keep the lower (earlier) ID
     sorted_vhs = sorted(vehicles, key=lambda v: v["track_id"])
     kept = []
     for vh in sorted_vhs:
@@ -644,7 +605,6 @@ def generate_actions(risk: float, severity: float, illegal: int, cong: float) ->
         acts.append(("high", "🔴 High Severity – Assign Additional Officers"))
     if not acts:
         acts.append(("low", "✅ Situation Normal – Continue Standard Monitoring"))
-    # deduplicate
     seen, out = set(), []
     for item in acts:
         if item[1] not in seen:
@@ -653,33 +613,61 @@ def generate_actions(risk: float, severity: float, illegal: int, cong: float) ->
 
 
 # ─────────────────────────────────────────────────────────────
-# ANNOTATION HELPERS
+# DRAW HELPERS  ← single source of truth for all annotation
 # ─────────────────────────────────────────────────────────────
 _RED    = (0, 0, 220)
 _GREEN  = (0, 200, 0)
 _ORANGE = (0, 140, 255)
 
-def draw_illegal(frame, bbox, tid, label, duration):
-    x1, y1, x2, y2 = bbox
-    cv2.rectangle(frame, (x1,y1), (x2,y2), _RED, 3)
-    tag = f"ILLEGAL #{tid} | {label} | {duration:.1f}s"
-    (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-    cv2.rectangle(frame, (x1, max(y1-th-8, 0)), (x1+tw+6, y1), _RED, -1)
-    cv2.putText(frame, tag, (x1+3, max(y1-4, th)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-    return frame
+_FONT       = cv2.FONT_HERSHEY_SIMPLEX
+_FONT_SCALE = 0.6
+_THICK      = 2
+_BOX_THICK  = 3
 
 
-def draw_sign_zones(frame, sign_zones):
+def _draw_label_box(frame, x1, y1, text, bg_color, text_color=(255, 255, 255)):
+    """Draw a filled label rectangle above (x1, y1) with text."""
+    (tw, th), baseline = cv2.getTextSize(text, _FONT, _FONT_SCALE, _THICK)
+    label_y1 = max(y1 - th - 8, 0)
+    label_y2 = y1
+    cv2.rectangle(frame, (x1, label_y1), (x1 + tw + 6, label_y2), bg_color, -1)
+    cv2.putText(frame, text, (x1 + 3, max(y1 - 4, th)),
+                _FONT, _FONT_SCALE, text_color, _THICK, cv2.LINE_AA)
+
+
+def draw_vehicle(frame: np.ndarray, bbox: tuple, label: str,
+                 tid: int = None, illegal: bool = False,
+                 duration: float = 0.0) -> None:
+    """
+    Draw exactly ONE bounding box for a vehicle.
+    - illegal=True  → thick red box + red label badge
+    - illegal=False → thick green box + green label text
+    Modifies frame in-place; returns nothing.
+    """
+    x1, y1, x2, y2 = (int(c) for c in bbox)
+
+    if illegal:
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _RED, _BOX_THICK)
+        tag = f"ILLEGAL #{tid} | {label} | {duration:.1f}s"
+        _draw_label_box(frame, x1, y1, tag, _RED)
+    else:
+        cv2.rectangle(frame, (x1, y1), (x2, y2), _GREEN, _BOX_THICK)
+        id_str = f" #{tid}" if tid is not None else ""
+        cv2.putText(frame, f"{label}{id_str}",
+                    (x1, max(y1 - 8, 12)),
+                    _FONT, _FONT_SCALE, _GREEN, _THICK, cv2.LINE_AA)
+
+
+def draw_sign_zones(frame: np.ndarray, sign_zones: list) -> np.ndarray:
+    """Overlay orange NO PARKING ZONE border when signs are detected."""
     if sign_zones:
-        # Encircle the entire frame with a single NO PARKING ZONE label
         h, w = frame.shape[:2]
         cv2.rectangle(frame, (0, 0), (w, h), _ORANGE, 6)
         label = "NO PARKING ZONE DETECTED"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-        cv2.rectangle(frame, (10, 10), (10+tw+20, 20+th+10), _ORANGE, -1)
-        cv2.putText(frame, label, (20, 20+th),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,0), 2)
+        (tw, th), _ = cv2.getTextSize(label, _FONT, 0.9, _THICK)
+        cv2.rectangle(frame, (10, 10), (10 + tw + 20, 20 + th + 10), _ORANGE, -1)
+        cv2.putText(frame, label, (20, 20 + th),
+                    _FONT, 0.9, (0, 0, 0), _THICK, cv2.LINE_AA)
     return frame
 
 
@@ -687,78 +675,72 @@ def draw_sign_zones(frame, sign_zones):
 # IMAGE PIPELINE
 # ─────────────────────────────────────────────────────────────
 def process_image(img_bgr: np.ndarray) -> dict:
+    """
+    FIX: detect_vehicles() returns a pre-annotated frame (YOLO draws on it).
+    We discard that annotated copy and always draw on a clean clone of the
+    original so every vehicle gets exactly ONE box.
+    """
     h, w = img_bgr.shape[:2]
 
-    # detect_vehicles now returns a CLEAN copy, and detected_vehicles as a list of dicts
-    annotated, total_count, counts, detected_vehicles = detect_vehicles(img_bgr)
+    # Run detection – we use the vehicle list but DISCARD the annotated frame
+    _annotated_discard, total_count, counts, detected_vehicles = detect_vehicles(img_bgr)
 
-    # Detect NO PARKING signs (OCR enabled for images)
+    # Work on a clean copy of the original
+    clean_frame = img_bgr.copy()
+
+    # Detect NO PARKING signs
     sign_zones = detect_no_parking_signs(img_bgr, use_ocr=False)
 
-    # Draw the orange NO PARKING border on the clean frame
-    annotated = draw_sign_zones(annotated, sign_zones)
+    # Draw the orange NO PARKING border
+    clean_frame = draw_sign_zones(clean_frame, sign_zones)
 
-    # ── Deduplicate overlapping YOLO detections (same physical car) ──────────
+    # Normalise vehicle dicts (handle tuple fallback from some detectors)
+    normalised = []
+    for vh in detected_vehicles:
+        if isinstance(vh, (tuple, list)):
+            normalised.append({"bbox": tuple(vh), "label": "vehicle"})
+        else:
+            normalised.append(vh)
+    detected_vehicles = normalised
+
+    # Deduplicate overlapping detections
     unique_vehicles = []
     for vh in detected_vehicles:
-        # Handle cases where detect_vehicles returns tuples instead of dicts
-        if isinstance(vh, (tuple, list)):
-            bbox = vh
-            label = "vehicle"
-            vh_dict = {"bbox": bbox, "label": label}
-        else:
-            bbox = vh["bbox"]
-            vh_dict = vh
-
-        duplicate = False
-        for uv in unique_vehicles:
-            if _bbox_iou(tuple(bbox), tuple(uv["bbox"])) >= 0.45:
-                duplicate = True
-                break
+        duplicate = any(
+            _bbox_iou(tuple(vh["bbox"]), tuple(uv["bbox"])) >= 0.45
+            for uv in unique_vehicles
+        )
         if not duplicate:
-            unique_vehicles.append(vh_dict)
+            unique_vehicles.append(vh)
     detected_vehicles = unique_vehicles
 
-    # ── Classify every box: illegal if any sign zone is present in the scene ──
-    # If a NO PARKING sign is visible anywhere, ALL parked vehicles are illegal.
-    # We also try the proximity check first; the full-scene fallback ensures no
-    # car is missed due to sign-zone coordinate misalignment.
-    violations    = []
-    illegal_boxes = set()
+    # Classify: illegal if any sign zone is present AND vehicle is near it
+    illegal_indices: set = set()
+    violations: list = []
 
     if sign_zones:
         for idx, vh in enumerate(detected_vehicles):
-            bbox = vh["bbox"]
-            near = vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX)
-            if near:
-                illegal_boxes.add(idx)
-                tid = idx + 1
+            if vehicle_near_any_sign(vh["bbox"], sign_zones, SIGN_PROXIMITY_PX):
+                illegal_indices.add(idx)
                 violations.append({
-                    "track_id": tid,
+                    "track_id": idx + 1,
                     "label"   : vh["label"],
                     "duration": 0.0,
-                    "bbox"    : bbox,
+                    "bbox"    : vh["bbox"],
                 })
 
-    # ── Draw exactly ONE box per vehicle (no double-boxing) ───────────────────
+    # ── Single drawing pass – ONE box per vehicle, no doubles ──────────────
     for idx, vh in enumerate(detected_vehicles):
-        x1, y1, x2, y2 = vh["bbox"]
-        label = vh["label"]
-        if idx in illegal_boxes:
-            tid = idx + 1
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), _RED, 3)
-            tag = f"ILLEGAL #{tid} | near NO PARKING"
-            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(annotated, (x1, max(y1-th-8, 0)), (x1+tw+6, y1), _RED, -1)
-            cv2.putText(annotated, tag, (x1+3, max(y1-4, th)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        else:
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), _GREEN, 3)
-            cv2.putText(annotated, label, (x1, max(y1-8, 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, _GREEN, 2)
+        draw_vehicle(
+            clean_frame,
+            vh["bbox"],
+            vh["label"],
+            tid      = idx + 1,
+            illegal  = (idx in illegal_indices),
+            duration = 0.0,
+        )
 
-    illegal_n = len(illegal_boxes)
-    # Extract just the boxes for compute_occupancy
+    illegal_n  = len(illegal_indices)
     boxes_only = [vh["bbox"] for vh in detected_vehicles]
     occ   = compute_occupancy(boxes_only, h, w)
     dens  = compute_density(total_count, h, w)
@@ -769,29 +751,37 @@ def process_image(img_bgr: np.ndarray) -> dict:
     acts  = generate_actions(risk, sev, illegal_n, cong)
 
     return dict(
-        annotated=annotated, total_count=total_count, counts=counts,
-        sign_zones=sign_zones, occupancy=occ, density=dens,
-        congestion=cong, illegal_count=illegal_n, violations=violations,
-        severity=sev, risk=risk, resources=res, actions=acts,
-        active_tracked=total_count, total_tracked=total_count,
+        annotated      = clean_frame,
+        total_count    = total_count,
+        counts         = counts,
+        sign_zones     = sign_zones,
+        occupancy      = occ,
+        density        = dens,
+        congestion     = cong,
+        illegal_count  = illegal_n,
+        violations     = violations,
+        severity       = sev,
+        risk           = risk,
+        resources      = res,
+        actions        = acts,
+        active_tracked = total_count,
+        total_tracked  = total_count,
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# STATIONARY CHECK
+# ─────────────────────────────────────────────────────────────
 def _is_stationary(tid: int, eff_fps: float) -> tuple:
-    """
-    Simple window-based stationary check (no camera compensation).
-    Compares max positional spread over last 20 processed positions.
-    Uses effective fps (fps / PROCESS_EVERY_N_FRAMES) for correct duration.
-    """
     history = parking_mod.vehicle_positions.get(tid)
     if not history or len(history) < MIN_STATIONARY_FRAMES:
         return False, 0.0
 
-    window  = min(20, len(history))
-    recent  = history[-window:]
-    xs      = [p[0] for p in recent]
-    ys      = [p[1] for p in recent]
-    spread  = math.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
+    window = min(20, len(history))
+    recent = history[-window:]
+    xs     = [p[0] for p in recent]
+    ys     = [p[1] for p in recent]
+    spread = math.sqrt((max(xs) - min(xs))**2 + (max(ys) - min(ys))**2)
 
     if spread < MOVEMENT_THRESHOLD_PX:
         parking_mod.stationary_frames[tid] = \
@@ -804,14 +794,15 @@ def _is_stationary(tid: int, eff_fps: float) -> tuple:
     return violation, round(duration, 2)
 
 
+# ─────────────────────────────────────────────────────────────
+# VIDEO PIPELINE
+# ─────────────────────────────────────────────────────────────
 def process_video(video_path: str, progress_bar) -> dict:
     """
-    Fast video pipeline:
-      - Processes 1-in-PROCESS_EVERY_N_FRAMES raw frames (speed).
-      - Sign detection via fast color+shape heuristic (no OCR).
-      - Dual violation logic:
-          1. Time-in-zone: vehicle inside a NO PARKING zone ≥ threshold → illegal.
-          2. Stationary fallback: no sign detected but vehicle hasn’t moved ≥ threshold → illegal.
+    FIX: track_vehicles() draws boxes internally on the frame it returns.
+    We always rebuild the output frame from frame.copy() so that the YOLO-
+    annotated return value is discarded. All boxes are drawn in a single
+    controlled pass at the bottom of the loop.
     """
     parking_mod.vehicle_positions.clear()
     parking_mod.stationary_frames.clear()
@@ -820,18 +811,17 @@ def process_video(video_path: str, progress_bar) -> dict:
     illegal_ids     : set  = set()
     violations_list : list = []
     sign_zones      : list = []
-    zone_entry      : dict = {}   # {tid: processed_idx when entered zone}
+    zone_entry      : dict = {}
 
-    # ── Final-frame snapshot (metrics always match the displayed frame) ──
-    last_annotated           = None
-    last_tracked   : list   = []
-    last_frame_counts        = {"car": 0, "bus": 0, "truck": 0, "motorcycle": 0}
-    last_frame_boxes : list = []
-    last_occ                 = 0.0
-    last_cong                = 0.0
-    last_dens                = 0.0
-    last_illegal_in_frame : set  = set()   # illegal IDs visible in final frame
-    last_violations_in_frame : list = []   # violation records for final frame
+    last_annotated            = None
+    last_tracked    : list   = []
+    last_frame_counts         = {"car": 0, "bus": 0, "truck": 0, "motorcycle": 0}
+    last_frame_boxes : list  = []
+    last_occ                  = 0.0
+    last_cong                 = 0.0
+    last_dens                 = 0.0
+    last_illegal_in_frame     : set  = set()
+    last_violations_in_frame  : list = []
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -844,7 +834,7 @@ def process_video(video_path: str, progress_bar) -> dict:
     w            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_idx    = 0
     proc_idx     = 0
-    eff_fps      = fps / PROCESS_EVERY_N_FRAMES   # real frames/sec we actually analyze
+    eff_fps      = fps / PROCESS_EVERY_N_FRAMES
 
     while True:
         ret, frame = cap.read()
@@ -852,7 +842,6 @@ def process_video(video_path: str, progress_bar) -> dict:
             break
         frame_idx += 1
 
-        # ── Frame skip ───────────────────────────────────────────────
         if frame_idx % PROCESS_EVERY_N_FRAMES != 1:
             progress_bar.progress(
                 min(frame_idx / total_frames, 1.0),
@@ -861,11 +850,11 @@ def process_video(video_path: str, progress_bar) -> dict:
             continue
         proc_idx += 1
 
-        # ── Sign detection (fast heuristic, every N processed frames) ──
+        # Sign detection (heuristic, every N processed frames)
         if proc_idx % SIGN_DETECT_EVERY_N == 1:
             sign_zones = detect_no_parking_signs(frame, use_ocr=False)
 
-        # ── Pre-resize for YOLO (imgsz=320 needs a small input) ──────
+        # Pre-resize for YOLO
         ph, pw = frame.shape[:2]
         if pw > 640:
             sc         = 640 / pw
@@ -875,45 +864,31 @@ def process_video(video_path: str, progress_bar) -> dict:
             proc_frame = frame
             sx, sy     = 1.0, 1.0
 
-        # ── YOLO track ────────────────────────────────────────────
+        # YOLO track – discard the annotated return frame, keep vehicle data only
         try:
-            tracked_frame, tracked_vehicles = track_vehicles(proc_frame)
+            _tracked_frame_discard, tracked_vehicles = track_vehicles(proc_frame)
             if sx != 1.0:
                 scaled = []
                 for vh in tracked_vehicles:
-                    x1,y1,x2,y2 = vh["bbox"]
-                    cx,cy        = vh["center"]
+                    x1, y1, x2, y2 = vh["bbox"]
+                    cx, cy          = vh["center"]
                     scaled.append({**vh,
-                        "bbox"  : (int(x1*sx),int(y1*sy),int(x2*sx),int(y2*sy)),
-                        "center": (int(cx*sx),int(cy*sy)),
+                        "bbox"  : (int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)),
+                        "center": (int(cx*sx),  int(cy*sy)),
                     })
                 tracked_vehicles = scaled
-                tracked_frame    = frame.copy()
-                for vh in tracked_vehicles:
-                    x1,y1,x2,y2 = vh["bbox"]
-                    cv2.rectangle(tracked_frame,(x1,y1),(x2,y2),(0,220,0),3)
-                    cv2.putText(tracked_frame, f"{vh['label']} #{vh['track_id']}",
-                                (x1,max(y1-10,20)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65,(0,220,0),2)
         except Exception:
-            tracked_frame    = frame.copy()
             tracked_vehicles = []
 
-        # ── Deduplicate: remove overlapping detections of the same physical vehicle ──
-        # YOLO sometimes assigns two track IDs to one car; IoU-NMS collapses them
-        # to a single entry (keeping the smaller/earlier track_id) so that one
-        # vehicle can only produce one illegal flag and one bounding box.
+        # Deduplicate overlapping detections
         tracked_vehicles = deduplicate_vehicles(tracked_vehicles, iou_threshold=0.45)
 
         # Update position history
         for vh in tracked_vehicles:
             update_vehicle(vh["track_id"], vh["center"])
 
-        # Draw sign zones on full-res frame
-        tracked_frame = draw_sign_zones(frame.copy(), sign_zones)
-
-        # ── Per-vehicle violation logic ─────────────────────────────
-        frame_counts = {"car":0,"bus":0,"truck":0,"motorcycle":0}
+        # Per-vehicle violation logic
+        frame_counts = {"car": 0, "bus": 0, "truck": 0, "motorcycle": 0}
         frame_boxes  = []
 
         for vh in tracked_vehicles:
@@ -926,19 +901,18 @@ def process_video(video_path: str, progress_bar) -> dict:
                 frame_counts[label] += 1
             frame_boxes.append(bbox)
 
-            near_sign = vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX) \
-                        if sign_zones else False
+            near_sign = (
+                vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX)
+                if sign_zones else False
+            )
 
-            # ── Method 1: Time-in-zone (primary – most reliable) ─────
             if near_sign:
                 if tid not in zone_entry:
                     zone_entry[tid] = proc_idx
                 duration     = (proc_idx - zone_entry[tid]) / eff_fps
-                # Flag immediately when near a sign — no waiting
                 is_violation = True
             else:
                 zone_entry.pop(tid, None)
-                # ── Method 2: Position-stationary fallback ──────────
                 is_violation, duration = _is_stationary(tid, eff_fps)
 
             duration = round(duration, 2)
@@ -952,47 +926,39 @@ def process_video(video_path: str, progress_bar) -> dict:
                     "bbox"    : bbox,
                 })
 
-        # ── Rebuild frame with exactly ONE box per vehicle ────────────
-        # Draw after all violation decisions so each vehicle gets one
-        # clean colour: red (illegal) or green (legal) — no double boxes.
+        # ── Build output frame: clean copy → sign overlay → one box per vehicle ──
+        output_frame = frame.copy()
+        output_frame = draw_sign_zones(output_frame, sign_zones)
+
         for vh in tracked_vehicles:
             tid   = vh["track_id"]
             bbox  = vh["bbox"]
             label = vh["label"]
-            x1, y1, x2, y2 = bbox
-            if tid in illegal_ids:
-                near_sign = vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX) \
-                            if sign_zones else False
-                dur = (proc_idx - zone_entry[tid]) / eff_fps if tid in zone_entry else \
-                      round(parking_mod.stationary_frames.get(tid, 0) / eff_fps, 2)
-                tracked_frame = draw_illegal(tracked_frame, bbox, tid, label, round(dur, 2))
-            else:
-                cv2.rectangle(tracked_frame, (x1, y1), (x2, y2), _GREEN, 3)
-                cv2.putText(tracked_frame, f"{label} #{tid}",
-                            (x1, max(y1-10, 20)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, _GREEN, 2)
+            is_ill = tid in illegal_ids
+            dur = (
+                (proc_idx - zone_entry[tid]) / eff_fps if tid in zone_entry
+                else round(parking_mod.stationary_frames.get(tid, 0) / eff_fps, 2)
+            )
+            draw_vehicle(output_frame, bbox, label,
+                         tid=tid, illegal=is_ill, duration=round(dur, 2))
 
-        # ── Compute per-frame analytics ──────────────────────────────
+        # Analytics for this frame
         occ  = compute_occupancy(frame_boxes, h, w)
         dens = compute_density(sum(frame_counts.values()), h, w)
         cong = compute_congestion(dens, occ)
 
-        # ── Snapshot this frame as the "current" state ────────────────
-        # Only vehicles present in this frame that are in illegal_ids
-        frame_tids              = {vh["track_id"] for vh in tracked_vehicles}
-        last_frame_counts       = dict(frame_counts)          # per-class count this frame
-        last_frame_boxes        = list(frame_boxes)           # bboxes this frame
-        last_occ                = occ
-        last_cong               = cong
-        last_dens               = dens
-        last_illegal_in_frame   = illegal_ids & frame_tids    # illegal & visible now
-        # Keep only violation records whose vehicle is still in this frame
+        # Snapshot
+        frame_tids               = {vh["track_id"] for vh in tracked_vehicles}
+        last_frame_counts        = dict(frame_counts)
+        last_frame_boxes         = list(frame_boxes)
+        last_occ                 = occ
+        last_cong                = cong
+        last_dens                = dens
+        last_illegal_in_frame    = illegal_ids & frame_tids
         last_violations_in_frame = [
-            v for v in violations_list
-            if v["track_id"] in last_illegal_in_frame
+            v for v in violations_list if v["track_id"] in last_illegal_in_frame
         ]
-
-        last_annotated = tracked_frame
+        last_annotated = output_frame
         last_tracked   = tracked_vehicles
 
         progress_bar.progress(
@@ -1003,25 +969,22 @@ def process_video(video_path: str, progress_bar) -> dict:
     cap.release()
     progress_bar.progress(1.0, text="✅ Done")
 
-    # ── Final-frame override: any vehicle currently near a sign is ALWAYS illegal ──
-    # This guarantees the annotated image and dashboard are in perfect sync.
-    # Even if the time threshold wasn't met (short video / brief appearance),
-    # a vehicle visibly next to a NO PARKING sign must be flagged.
+    # ── Final-frame override ──────────────────────────────────────────────────
+    # Any vehicle currently near a sign must be flagged even if the time
+    # threshold wasn't reached. We draw only NEW violations here (vehicles
+    # not already drawn during the loop) to guarantee no double boxes.
     if sign_zones and last_tracked and last_annotated is not None:
-        # Deduplicate the last frame's tracked vehicles too, so the override
-        # cannot introduce a second box for an already-flagged vehicle.
         last_tracked = deduplicate_vehicles(last_tracked, iou_threshold=0.45)
-
-        # Track which IDs have already been drawn as illegal during the loop
-        already_drawn_illegal = set(illegal_ids)  # snapshot before override
+        already_drawn = set(illegal_ids)   # IDs drawn in the last loop pass
 
         for vh in last_tracked:
             tid  = vh["track_id"]
             bbox = vh["bbox"]
             lbl  = vh["label"]
+
             if vehicle_near_any_sign(bbox, sign_zones, SIGN_PROXIMITY_PX):
                 if tid not in illegal_ids:
-                    # Brand-new violation — add to ids, list, and draw once
+                    # Brand-new violation – add and draw once
                     illegal_ids.add(tid)
                     violations_list.append({
                         "track_id": tid,
@@ -1029,30 +992,26 @@ def process_video(video_path: str, progress_bar) -> dict:
                         "duration": 0.0,
                         "bbox"    : bbox,
                     })
-                    last_annotated = draw_illegal(last_annotated, bbox, tid, lbl, 0.0)
-                # If tid was already in illegal_ids AND was NOT drawn during the
-                # final processed frame's loop (edge case: tracking lost then
-                # re-appeared), redraw it exactly once.
-                elif tid not in already_drawn_illegal:
-                    last_annotated = draw_illegal(last_annotated, bbox, tid, lbl, 0.0)
-                # else: already drawn during the loop — do NOT draw again.
+                    draw_vehicle(last_annotated, bbox, lbl,
+                                 tid=tid, illegal=True, duration=0.0)
+                elif tid not in already_drawn:
+                    # Was flagged earlier but not drawn in final loop pass
+                    draw_vehicle(last_annotated, bbox, lbl,
+                                 tid=tid, illegal=True, duration=0.0)
+                # else: already drawn during the loop → skip (no double box)
 
-        # Rebuild final-frame snapshots after the override
-        frame_tids             = {vh["track_id"] for vh in last_tracked}
-        last_illegal_in_frame  = illegal_ids & frame_tids
+        frame_tids               = {vh["track_id"] for vh in last_tracked}
+        last_illegal_in_frame    = illegal_ids & frame_tids
         last_violations_in_frame = [
-            v for v in violations_list
-            if v["track_id"] in last_illegal_in_frame
+            v for v in violations_list if v["track_id"] in last_illegal_in_frame
         ]
 
-    # ── All metrics derived from the FINAL processed frame only ─────
-    # This ensures the dashboard matches exactly what is shown in the
-    # annotated output image (no historical accumulation artefacts).
-    final_total    = sum(last_frame_counts.values())
-    final_illegal  = len(last_illegal_in_frame)
-    final_occ      = round(last_occ,  2)
-    final_cong     = round(last_cong, 2)
-    final_dens     = round(last_dens, 2)
+    # Final metrics from last processed frame only
+    final_total   = sum(last_frame_counts.values())
+    final_illegal = len(last_illegal_in_frame)
+    final_occ     = round(last_occ,  2)
+    final_cong    = round(last_cong, 2)
+    final_dens    = round(last_dens, 2)
 
     sev  = compute_severity(final_total, final_illegal, final_occ, final_cong)
     risk = compute_risk(final_illegal, final_cong, final_occ, final_dens)
@@ -1178,8 +1137,6 @@ def _resource(icon, count, name):
 # ─────────────────────────────────────────────────────────────
 # ════════════════ MAIN UI ════════════════
 # ─────────────────────────────────────────────────────────────
-
-# ── Hero banner ──────────────────────────────────────────────
 st.markdown("""
 <div class="hero-banner">
     <div class="hero-title">🚦 SmartPark AI — Parking Intelligence Dashboard</div>
@@ -1189,9 +1146,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 1 – UPLOAD
-# ─────────────────────────────────────────────────────────────
+# ── Upload Panel ─────────────────────────────────────────────
 st.markdown('<div class="section-header">📂 Upload Panel</div>', unsafe_allow_html=True)
 
 _IMAGE_EXTS = {"jpg","jpeg","png","bmp","tiff","tif","webp","gif","jfif","heic","heif"}
@@ -1227,9 +1182,7 @@ if uploaded_file is None:
     """, unsafe_allow_html=True)
     st.stop()
 
-# ─────────────────────────────────────────────────────────────
-# RUN ANALYSIS BUTTON
-# ─────────────────────────────────────────────────────────────
+# ── Run Analysis ─────────────────────────────────────────────
 st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 run_col, info_col = st.columns([1, 5])
 with run_col:
@@ -1246,14 +1199,12 @@ with info_col:
 if run_btn:
     st.session_state["results_ready"] = False
 
-    # ── IMAGE ──────────────────────────────────────────────
     if file_type == "image":
         file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
         img_bgr    = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         with st.spinner("🔍 Running YOLO detection & analytics…"):
             results = process_image(img_bgr)
 
-    # ── VIDEO ──────────────────────────────────────────────
     else:
         suffix_map = {
             "video/mp4":".mp4","video/avi":".avi","video/quicktime":".mov",
@@ -1269,7 +1220,6 @@ if run_btn:
             tmp.write(uploaded_file.read())
             tmp_path = tmp.name
 
-        # Progress bar only – no live preview duplication
         st.markdown('<div class="section-header">⏳ Processing Video</div>',
                     unsafe_allow_html=True)
         progress_ph = st.progress(0, text="Initialising…")
@@ -1297,31 +1247,27 @@ if run_btn:
             "_density"        : results.get("density", 0),
         })
 
-# ─────────────────────────────────────────────────────────────
-# DISPLAY RESULTS
-# ─────────────────────────────────────────────────────────────
+# ── Display Results ───────────────────────────────────────────
 if not st.session_state["results_ready"]:
     st.stop()
 
-ann_frame    = st.session_state["annotated_frame"]
-counts       = st.session_state["last_counts"]
-total_veh    = st.session_state["last_total"]
-illegal_n    = st.session_state["last_illegal"]
-occupancy    = st.session_state["last_occupancy"]
-congestion   = st.session_state["last_congestion"]
-severity     = st.session_state["last_severity"]
-risk         = st.session_state["last_risk"]
-sign_zones   = st.session_state["sign_zones"]
-violations   = st.session_state["violations"]
-act_tracked  = st.session_state["active_tracked"]
-tot_tracked  = st.session_state["total_tracked"]
-resources    = st.session_state["_resources"]
-actions      = st.session_state["_actions"]
-density      = st.session_state["_density"]
+ann_frame  = st.session_state["annotated_frame"]
+counts     = st.session_state["last_counts"]
+total_veh  = st.session_state["last_total"]
+illegal_n  = st.session_state["last_illegal"]
+occupancy  = st.session_state["last_occupancy"]
+congestion = st.session_state["last_congestion"]
+severity   = st.session_state["last_severity"]
+risk       = st.session_state["last_risk"]
+sign_zones = st.session_state["sign_zones"]
+violations = st.session_state["violations"]
+act_tracked= st.session_state["active_tracked"]
+tot_tracked= st.session_state["total_tracked"]
+resources  = st.session_state["_resources"]
+actions    = st.session_state["_actions"]
+density    = st.session_state["_density"]
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 2 – ANNOTATED DETECTION VIEWER  (single output)
-# ─────────────────────────────────────────────────────────────
+# ── Annotated Detection Result ────────────────────────────────
 st.markdown('<div class="section-header">🖼️ Annotated Detection Result</div>',
             unsafe_allow_html=True)
 
@@ -1332,10 +1278,9 @@ if ann_frame is not None:
 else:
     st.info("No annotated output available.")
 
-# Legend
 st.markdown("""
 <div style="display:flex; gap:1.5rem; margin:0.4rem 0 0.8rem; flex-wrap:wrap; font-size:0.83rem;">
-    <span style="color:#00c800; font-weight:600;">■ Vehicle Detected</span>
+    <span style="color:#00c800; font-weight:600;">■ Vehicle Detected (Legal)</span>
     <span style="color:#dc2626; font-weight:600;">■ Illegal Parking</span>
     <span style="color:#ea580c; font-weight:600;">■ NO PARKING Zone</span>
 </div>
@@ -1343,17 +1288,15 @@ st.markdown("""
 
 st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 3 – METRICS DASHBOARD
-# ─────────────────────────────────────────────────────────────
+# ── Metrics Dashboard ─────────────────────────────────────────
 st.markdown('<div class="section-header">📊 Metrics Dashboard</div>', unsafe_allow_html=True)
 
 r1 = st.columns(6)
-with r1[0]: st.markdown(_metric("Total Vehicles", total_veh), unsafe_allow_html=True)
-with r1[1]: st.markdown(_metric("Cars",  counts.get("car",0)), unsafe_allow_html=True)
-with r1[2]: st.markdown(_metric("Buses", counts.get("bus",0)), unsafe_allow_html=True)
-with r1[3]: st.markdown(_metric("Trucks",counts.get("truck",0)), unsafe_allow_html=True)
-with r1[4]: st.markdown(_metric("Motorcycles",counts.get("motorcycle",0)), unsafe_allow_html=True)
+with r1[0]: st.markdown(_metric("Total Vehicles",    total_veh),              unsafe_allow_html=True)
+with r1[1]: st.markdown(_metric("Cars",  counts.get("car",0)),                unsafe_allow_html=True)
+with r1[2]: st.markdown(_metric("Buses", counts.get("bus",0)),                unsafe_allow_html=True)
+with r1[3]: st.markdown(_metric("Trucks",counts.get("truck",0)),              unsafe_allow_html=True)
+with r1[4]: st.markdown(_metric("Motorcycles",counts.get("motorcycle",0)),    unsafe_allow_html=True)
 with r1[5]: st.markdown(_metric("Illegal Vehicles", illegal_n, danger=illegal_n>0),
                         unsafe_allow_html=True)
 
@@ -1373,9 +1316,7 @@ with r2[5]: st.markdown(_metric(f"Risk ({risk_level(risk)})",
 
 st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# VIOLATIONS TABLE
-# ─────────────────────────────────────────────────────────────
+# ── Violations Table ──────────────────────────────────────────
 if violations:
     st.markdown('<div class="section-header">🚨 Illegal Parking Violations</div>',
                 unsafe_allow_html=True)
@@ -1401,21 +1342,17 @@ if sign_zones:
         )
     st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 4 – RESOURCE PLANNER
-# ─────────────────────────────────────────────────────────────
+# ── Resource Planner ──────────────────────────────────────────
 st.markdown('<div class="section-header">🗂️ Enforcement Resource Planner</div>',
             unsafe_allow_html=True)
 rc = st.columns(3)
-with rc[0]: st.markdown(_resource("👮", resources.get("officers",1),    "Officers Recommended"), unsafe_allow_html=True)
+with rc[0]: st.markdown(_resource("👮", resources.get("officers",1),     "Officers Recommended"), unsafe_allow_html=True)
 with rc[1]: st.markdown(_resource("🚔", resources.get("patrol_vehicles",0),"Patrol Vehicles"),    unsafe_allow_html=True)
-with rc[2]: st.markdown(_resource("🚛", resources.get("tow_trucks",0),  "Tow Trucks"),           unsafe_allow_html=True)
+with rc[2]: st.markdown(_resource("🚛", resources.get("tow_trucks",0),   "Tow Trucks"),           unsafe_allow_html=True)
 
 st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 5 – ACTION RECOMMENDATIONS
-# ─────────────────────────────────────────────────────────────
+# ── Action Recommendations ────────────────────────────────────
 st.markdown('<div class="section-header">⚡ Action Recommendations</div>',
             unsafe_allow_html=True)
 for priority, text in actions:
@@ -1424,9 +1361,7 @@ for priority, text in actions:
 
 st.markdown('<hr class="sp-divider">', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SECTION 6 – ANALYTICS CHARTS
-# ─────────────────────────────────────────────────────────────
+# ── Analytics Charts ──────────────────────────────────────────
 st.markdown('<div class="section-header">📈 Analytics Charts</div>',
             unsafe_allow_html=True)
 
@@ -1452,9 +1387,7 @@ with chart_r:
 st.plotly_chart(score_bar_chart(density, occupancy, congestion, severity, risk),
                 use_container_width=True, config={"displayModeBar":False})
 
-# ─────────────────────────────────────────────────────────────
-# FOOTER
-# ─────────────────────────────────────────────────────────────
+# ── Footer ────────────────────────────────────────────────────
 st.markdown("""
 <hr class="sp-divider">
 <div style="text-align:center; color:#94a3b8; font-size:0.76rem; padding:0.4rem 0 1rem;">
