@@ -57,7 +57,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    df = pd.read_csv(csv_path, nrows=50000)
+    df = pd.read_csv(csv_path)
 
     df = df.dropna(
         subset=[
@@ -559,11 +559,11 @@ st.markdown("""
 
 Higher intensity indicates:
 
-• More parking violations
+- More parking violations
 
-• Lower parking availability
+- Lower parking availability
 
-• Higher congestion probability
+- Higher congestion probability
 
 """)
 
@@ -583,15 +583,15 @@ if avg_pressure > 70:
 
 
     st.error("""
-• Severe parking shortage detected.
+- Severe parking shortage detected.
 
-• Create temporary parking zones.
+- Create temporary parking zones.
 
-• Increase enforcement teams.
+- Increase enforcement teams.
 
-• Redirect vehicles to alternative areas.
+- Redirect vehicles to alternative areas.
 
-• Continuous monitoring required.
+- Continuous monitoring required.
 """)
 
 
@@ -599,13 +599,13 @@ elif avg_pressure > 40:
 
 
     st.warning("""
-• Moderate parking pressure detected.
+- Moderate parking pressure detected.
 
-• Optimize parking allocation.
+- Optimize parking allocation.
 
-• Monitor crowded zones.
+- Monitor crowded zones.
 
-• Improve parking availability.
+- Improve parking availability.
 """)
 
 
@@ -613,9 +613,9 @@ else:
 
 
     st.success("""
-• Parking availability is stable.
+- Parking availability is stable.
 
-• Normal traffic monitoring sufficient.
+- Normal traffic monitoring sufficient.
 
-• Current parking management effective.
+- Current parking management effective.
 """)
