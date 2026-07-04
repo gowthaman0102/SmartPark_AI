@@ -32,7 +32,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    df = pd.read_csv(csv_path, nrows=50000)
+    df = pd.read_csv(csv_path)
 
     df["junction_name"] = (
         df["junction_name"]
@@ -316,51 +316,51 @@ st.subheader("🤖 AI Recommended Actions")
 if level == "CRITICAL":
 
     st.error(f"""
-• Immediate towing operation
+- Immediate towing operation
 
-• Deploy {officers} traffic officers
+- Deploy {officers} traffic officers
 
-• Deploy {tow_trucks} tow trucks
+- Deploy {tow_trucks} tow trucks
 
-• Issue congestion alert
+- Issue congestion alert
 
-• Continuous hotspot monitoring
+- Continuous hotspot monitoring
 
-• Increase enforcement frequency
+- Increase enforcement frequency
 """)
 
 elif level == "HIGH":
 
     st.warning(f"""
-• Deploy {officers} traffic officers
+- Deploy {officers} traffic officers
 
-• Deploy {tow_trucks} tow trucks
+- Deploy {tow_trucks} tow trucks
 
-• Increase patrol frequency
+- Increase patrol frequency
 
-• Monitor congestion growth
+- Monitor congestion growth
 
-• Schedule enforcement checks
+- Schedule enforcement checks
 """)
 
 elif level == "MEDIUM":
 
     st.info(f"""
-• Deploy {officers} traffic officers
+- Deploy {officers} traffic officers
 
-• Moderate enforcement
+- Moderate enforcement
 
-• Active monitoring
+- Active monitoring
 """)
 
 else:
 
     st.success("""
-• Standard monitoring
+- Standard monitoring
 
-• Routine patrol
+- Routine patrol
 
-• No escalation required
+- No escalation required
 """)
 
 # =====================================================
