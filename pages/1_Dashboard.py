@@ -32,7 +32,7 @@ def load_data():
         / "parking_violations.csv"
     )
 
-    df = pd.read_csv(csv_path, nrows=50000)
+    df = pd.read_csv(csv_path)
 
     def extract_primary_violation(x):
         try:
@@ -62,13 +62,13 @@ st.title("📊 SmartPark Dashboard")
 st.info("""
 ### Key Insights
 
-• 298,450 parking violations analyzed
+- 298,450 parking violations analyzed
 
-• Safina Plaza and KR Market are major congestion hotspots
+- Safina Plaza and KR Market are major congestion hotspots
 
-• Cars, Scooters and Passenger Autos contribute most violations
+- Cars, Scooters and Passenger Autos contribute most violations
 
-• Parking violations directly impact road capacity and congestion
+- Parking violations directly impact road capacity and congestion
 """)
 
 # =====================================
@@ -409,21 +409,21 @@ top_hotspot = (
 summary_text = f"""
 ### SmartPark AI Assessment
 
-• Total Violations Analyzed: {len(df):,}
+- Total Violations Analyzed: {len(df):,}
 
-• Highest Risk Violation:
+- Highest Risk Violation:
 {top_violation}
 
-• Most Congested Hotspot:
+- Most Congested Hotspot:
 {top_hotspot}
 
-• City Health Score:
+- City Health Score:
 {health_score}/100
 
-• Enforcement Efficiency:
+- Enforcement Efficiency:
 {efficiency_score}/100
 
-• Capacity Utilization:
+- Capacity Utilization:
 {utilization}%
 
 ### Recommended Action
