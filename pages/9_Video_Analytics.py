@@ -15,7 +15,8 @@ from utils.yolo_detector import (
 
 from utils.parking_detector import (
     update_vehicle,
-    check_illegal_parking
+    check_illegal_parking,
+    reset_tracking
 )
 
 from utils.congestion_engine import calculate_congestion
@@ -176,13 +177,192 @@ if uploaded_file is not None:
             delete=False
         )
 
-        temp_file.write(
-            uploaded_file.read()
-        )
+        file_bytes = uploaded_file.read()
+
+        temp_file.write(file_bytes)
 
         video_path = temp_file.name
 
+        # -------------------------------------------------------
+        # Identify this specific upload so zone/settings state
+        # doesn't leak between different videos.
+        # -------------------------------------------------------
+        file_identity = f"{uploaded_file.name}_{len(file_bytes)}"
+
+        if st.session_state.get("video_identity") != file_identity:
+
+            st.session_state["video_identity"] = file_identity
+            st.session_state["run_video_analysis"] = False
+            st.session_state["zone_points_pct"] = [
+                (0.20, 0.55),
+                (0.80, 0.55),
+                (0.90, 0.95),
+                (0.10, 0.95),
+            ]
+
+        # -------------------------------------------------------
+        # Grab a single preview frame (does NOT consume the
+        # capture used later for the real analysis loop).
+        # -------------------------------------------------------
+        preview_cap = cv2.VideoCapture(video_path)
+        ret_preview, preview_frame = preview_cap.read()
+        preview_cap.release()
+
+        if not ret_preview:
+            st.error(
+                "⚠ Could not read this video file. It may be corrupted "
+                "or use an unsupported codec."
+            )
+            st.stop()
+
+        frame_h, frame_w = preview_frame.shape[:2]
+
+        # =================================================
+        # NO-PARKING ZONE SETUP
+        # =================================================
+
+        st.subheader("🅿️ No-Parking Zone Setup")
+
+        st.caption(
+            "Optional: mark the restricted area for THIS clip. A vehicle "
+            "stopping inside the red zone is flagged illegal almost "
+            "immediately. Outside the zone, the normal stationary-time "
+            "rule is used as a fallback. Since your footage comes from "
+            "varied camera angles, redraw this for each new clip."
+        )
+
+        zone_enabled = st.checkbox(
+            "Enable No-Parking Zone for this video",
+            value=True,
+            key=f"zone_enabled_{file_identity}"
+        )
+
+        zone_points_px = []
+
+        if zone_enabled:
+
+            pts_pct = st.session_state["zone_points_pct"]
+
+            col1, col2 = st.columns(2)
+
+            new_pts_pct = []
+
+            labels = [
+                "Point 1 (top-left)",
+                "Point 2 (top-right)",
+                "Point 3 (bottom-right)",
+                "Point 4 (bottom-left)"
+            ]
+
+            for i, label in enumerate(labels):
+
+                col = col1 if i % 2 == 0 else col2
+
+                with col:
+                    st.markdown(f"**{label}**")
+                    x_pct = st.slider(
+                        f"X % - {label}",
+                        0, 100,
+                        int(pts_pct[i][0] * 100),
+                        key=f"zone_x_{i}_{file_identity}"
+                    )
+                    y_pct = st.slider(
+                        f"Y % - {label}",
+                        0, 100,
+                        int(pts_pct[i][1] * 100),
+                        key=f"zone_y_{i}_{file_identity}"
+                    )
+                    new_pts_pct.append((x_pct / 100, y_pct / 100))
+
+            st.session_state["zone_points_pct"] = new_pts_pct
+
+            zone_points_px = [
+                (int(x * frame_w), int(y * frame_h))
+                for x, y in new_pts_pct
+            ]
+
+            preview_display = preview_frame.copy()
+
+            overlay = preview_display.copy()
+
+            cv2.fillPoly(
+                overlay,
+                [np.array(zone_points_px, dtype=np.int32)],
+                (0, 0, 255)
+            )
+
+            preview_display = cv2.addWeighted(
+                overlay, 0.3, preview_display, 0.7, 0
+            )
+
+            cv2.polylines(
+                preview_display,
+                [np.array(zone_points_px, dtype=np.int32)],
+                isClosed=True,
+                color=(0, 0, 255),
+                thickness=3
+            )
+
+            st.image(
+                cv2.cvtColor(preview_display, cv2.COLOR_BGR2RGB),
+                caption="No-parking zone preview (adjust sliders above)",
+                use_container_width=True
+            )
+
+        else:
+            st.info(
+                "Zone disabled — illegal parking will be judged purely "
+                "by how long a vehicle stays stationary anywhere in frame."
+            )
+
+        # =================================================
+        # START / RE-RUN CONTROLS
+        # =================================================
+
+        start_col, reset_col = st.columns([3, 1])
+
+        with start_col:
+            start_clicked = st.button(
+                "▶ Start Detection",
+                type="primary",
+                key=f"start_{file_identity}"
+            )
+
+        with reset_col:
+            if st.button("🔁 Reset", key=f"reset_{file_identity}"):
+                st.session_state["run_video_analysis"] = False
+                st.rerun()
+
+        if start_clicked:
+            st.session_state["run_video_analysis"] = True
+
+        if not st.session_state.get("run_video_analysis"):
+            st.info(
+                "Set your no-parking zone (or disable it) above, then "
+                "click **Start Detection** to analyze the video."
+            )
+            st.stop()
+
+        # =================================================
+        # RUN DETECTION
+        # =================================================
+
+        # Wipe any tracking state left over from a previous video /
+        # previous run so old track IDs can never bleed into this one.
+        reset_tracking()
+
         cap = cv2.VideoCapture(video_path)
+
+        raw_fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if not raw_fps or raw_fps <= 0:
+            raw_fps = 30.0
+
+        SAMPLE_INTERVAL = 30  # analyze 1 out of every N raw frames
+
+        # This is the fps that actually matters for the stationary-time
+        # math: how many times per REAL second we call update_vehicle().
+        effective_fps = raw_fps / SAMPLE_INTERVAL
 
         frame_count = 0
 
@@ -211,6 +391,12 @@ if uploaded_file is not None:
 
         illegal_vehicle_ids = set()
 
+        zone_arr = (
+            np.array(zone_points_px, dtype=np.int32)
+            if zone_enabled and zone_points_px
+            else None
+        )
+
         while True:
 
             ret, frame = cap.read()
@@ -220,10 +406,21 @@ if uploaded_file is not None:
 
             frame_count += 1
 
-            if frame_count % 30 != 0:
+            if frame_count % SAMPLE_INTERVAL != 0:
                 continue
 
             annotated, tracked_vehicles = track_vehicles(frame)
+
+            if zone_arr is not None:
+                overlay = annotated.copy()
+                cv2.fillPoly(overlay, [zone_arr], (0, 0, 255))
+                annotated = cv2.addWeighted(
+                    overlay, 0.2, annotated, 0.8, 0
+                )
+                cv2.polylines(
+                    annotated, [zone_arr],
+                    isClosed=True, color=(0, 0, 255), thickness=2
+                )
 
             frame_total = len(tracked_vehicles)
 
@@ -249,10 +446,13 @@ if uploaded_file is not None:
                     center
                 )
 
-                violation, duration = check_illegal_parking(
+                violation, duration, in_zone = check_illegal_parking(
                     track_id,
-                    fps=30,
-                    threshold_seconds=5
+                    center=center,
+                    zone_points=zone_points_px if zone_enabled else None,
+                    fps=effective_fps,
+                    threshold_seconds=5,
+                    zone_threshold_seconds=2
                 )
 
                 if label in frame_counts:
@@ -273,15 +473,14 @@ if uploaded_file is not None:
                 )
 
                 cv2.putText(
-                annotated,
-                f"{label} #{track_id}",
-                (x1, max(y1 - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-                
+                    annotated,
+                    f"{label} #{track_id}",
+                    (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
 
                 if violation:
 
@@ -299,9 +498,11 @@ if uploaded_file is not None:
                         3
                     )
 
+                    tag = "ILLEGAL (ZONE)" if in_zone else "ILLEGAL"
+
                     cv2.putText(
                         annotated,
-                        f"ILLEGAL {duration:.1f}s",
+                        f"{tag} {duration:.1f}s",
                         (x1, max(y1 - 10, 20)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
@@ -339,7 +540,10 @@ if uploaded_file is not None:
                     )
                 )
 
-            cap.release()
+        # cap.release() happens ONCE, after the loop has fully
+        # finished — releasing it mid-loop was the bug that caused
+        # the whole video to be judged from a single frame.
+        cap.release()
 
         illegal_vehicle_count = len(
             illegal_vehicle_ids
